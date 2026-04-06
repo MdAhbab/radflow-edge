@@ -8,21 +8,8 @@ env/
 ENV/
 env.bak/
 venv.bak/
-
 # --- Python ---
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.python-version
-build/
-dist/
-site/
-.eggs/
-*.egg
-*.egg-info/
-pip-wheel-metadata/
 
 # --- Python tooling / tests ---
 .pytest_cache/
@@ -36,10 +23,6 @@ pip-wheel-metadata/
 .coverage.*
 coverage.xml
 htmlcov/
-
-# --- Jupyter ---
-.ipynb_checkpoints/
-
 # --- Frontend / Node ---
 node_modules/
 npm-debug.log*
@@ -54,39 +37,23 @@ pnpm-debug.log*
 .pnp
 .pnp.js
 Frontend/.vite/
-Frontend/dist/
-
 # --- IDE / Editor ---
 .idea/
 .vscode/
 *.swp
 *.swo
-
 # --- OS files ---
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-Thumbs.db
-ehthumbs.db
 
-# --- Runtime artifacts ---
-*.log
-logs/
-.cache/
-tmp/
-temp/
-
-# --- Databases (keep local DBs out of Git) ---
-*.db
-*.db-*
-*.sqlite
-*.sqlite3
-
-# --- Project-specific large/generated assets ---
 Models/
-models/
 imagedata/
-dataset/
-chroma_db/
+
+!*.py
+!*.ts
+!*.tsx
+!backend/
+!Frontend/
