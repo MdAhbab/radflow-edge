@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-HSIL Hackathon 2026 - Unified Launcher
-Runs Backend, Frontend, and AI Pipeline
+HSIL Hackathon 2026 - Unified Launcher (Refactored)
+Runs Backend, Frontend, and AI Pipeline with improved stability and multi-threaded logging.
 """
 
 import os
@@ -9,6 +9,8 @@ import sys
 import subprocess
 import signal
 import time
+import threading
+import queue
 from pathlib import Path
 
 # Terminal colors for better visibility
@@ -42,6 +44,43 @@ def print_error(message):
 
 # Global list to track all running processes
 processes = []
+log_queue = queue.Queue()
+
+def kill_port(port):
+    """Effectively clears any process blocking a specific port (Windows)"""
+    if sys.platform != "win32":
+        return
+    
+    try:
+        # Use netstat to find PIDs using the port
+        cmd = f'netstat -ano | findstr LISTENING | findstr :{port}'
+        output = subprocess.check_output(cmd, shell=True).decode()
+        pids = set()
+        for line in output.strip().split('\n'):
+            parts = line.strip().split()
+            if len(parts) > 4:
+                pid = parts[-1]
+                if pid.isdigit() and pid != '0':
+                    pids.add(pid)
+        
+        for pid in pids:
+            print_info(f"Purging existing process {pid} on port {port}...")
+            # /F = Force, /T = Kill process tree (child processes like uvicorn)
+            subprocess.run(['taskkill', '/F', '/T', '/PID', pid], capture_output=True)
+            time.sleep(0.5) # Wait for OS to release the socket
+    except:
+        pass
+
+def reader_thread(name, stream, q):
+    """Worker thread to read logs into the queue without blocking the launcher"""
+    try:
+        for line in iter(stream.readline, ''):
+            if line:
+                q.put((name, line.strip()))
+    except Exception:
+        pass
+    finally:
+        stream.close()
 
 def cleanup(signum=None, frame=None):
     """Cleanup function to terminate all processes on exit"""
@@ -52,21 +91,21 @@ def cleanup(signum=None, frame=None):
             print_info(f"Stopping {name}...")
             try:
                 if sys.platform == "win32":
-                    # Windows: send CTRL_C_EVENT
-                    proc.send_signal(signal.CTRL_C_EVENT)
+                    # Windows: use taskkill to kill the whole process tree (/T) and force (/F)
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
                 else:
                     # Unix: send SIGTERM
                     proc.terminate()
-                proc.wait(timeout=5)
+                    proc.wait(timeout=5)
                 print_success(f"{name} stopped")
-            except subprocess.TimeoutExpired:
-                print_warning(f"{name} didn't stop gracefully, forcing...")
-                proc.kill()
             except Exception as e:
                 print_error(f"Error stopping {name}: {e}")
 
     print_success("All services stopped")
-    sys.exit(0)
+    # Small delay for terminal to catch up
+    time.sleep(1)
+    # Use os._exit to force immediate exit if running in background
+    os._exit(0)
 
 def check_dependencies():
     """Check if required dependencies are installed"""
@@ -102,7 +141,6 @@ def check_dependencies():
             return False
     except FileNotFoundError:
         print_error("Node.js not found. Please install Node.js")
-        print_info("Download from: https://nodejs.org/")
         return False
 
     # Check npm (use npm.cmd on Windows)
@@ -113,60 +151,30 @@ def check_dependencies():
             print_success(f"npm: {result.stdout.strip()}")
         else:
             print_error("npm not found")
-            print_warning("npm should be installed with Node.js. Try restarting your terminal.")
             return False
     except FileNotFoundError:
         print_error("npm not found")
-        print_warning("npm should be installed with Node.js. Try restarting your terminal.")
         return False
 
     print_success("All dependencies OK")
     return True
 
-def select_experiment():
-    """Ask user which experiment to run"""
-    print_header("Select AI Pipeline")
-
-    print(f"{Colors.OKCYAN}Which AI pipeline would you like to run?{Colors.ENDC}\n")
-    print(f"{Colors.BOLD}1.{Colors.ENDC} Experiment 1 - RadFlow-Edge Pipeline")
-    print(f"   {Colors.OKBLUE}(CNN Detection + GradCAM + RAG + VLM){Colors.ENDC}")
-    print(f"\n{Colors.BOLD}2.{Colors.ENDC} Experiment 2 - Foveal Engine")
-    print(f"   {Colors.OKBLUE}(Attention-based Preprocessing){Colors.ENDC}")
-    print(f"\n{Colors.BOLD}3.{Colors.ENDC} Both Experiments")
-    print(f"\n{Colors.BOLD}4.{Colors.ENDC} Backend + Frontend Only (No AI)")
-
-    while True:
-        try:
-            choice = input(f"\n{Colors.WARNING}Enter your choice (1-4): {Colors.ENDC}").strip()
-            if choice in ['1', '2', '3', '4']:
-                return int(choice)
-            else:
-                print_error("Invalid choice. Please enter 1, 2, 3, or 4")
-        except KeyboardInterrupt:
-            print("\n")
-            cleanup()
-        except Exception as e:
-            print_error(f"Error: {e}")
-
-def start_backend(pipeline_mode: str = "both"):
-    """Start the FastAPI backend"""
+def start_backend(pipeline_mode: str = "experiment1"):
+    """Start the FastAPI backend with multi-threaded log capture"""
     print_header("Starting Backend Server")
 
     backend_dir = Path(__file__).parent / "backend"
-
     if not backend_dir.exists():
         print_error(f"Backend directory not found: {backend_dir}")
         return None
 
-    print_info(f"Backend directory: {backend_dir}")
-    print_info("Starting FastAPI server on http://localhost:8000")
-    print_info(f"Pipeline mode: {pipeline_mode}")
-
+    print_info(f"Starting FastAPI server on http://localhost:8000")
+    
     try:
         backend_env = os.environ.copy()
         backend_env["HSIL_PIPELINE_MODE"] = pipeline_mode
 
-        # Start backend using uvicorn command directly
+        # Start backend
         proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"],
             cwd=backend_dir,
@@ -178,12 +186,13 @@ def start_backend(pipeline_mode: str = "both"):
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         )
 
+        # Start log reader thread
+        threading.Thread(target=reader_thread, args=("Backend", proc.stdout, log_queue), daemon=True).start()
+
         # Wait a bit and check if it started successfully
-        time.sleep(3)
+        time.sleep(2)
         if proc.poll() is not None:
-            print_error("Backend failed to start")
-            output, _ = proc.communicate()
-            print(output)
+            print_error("Backend failed to start immediately. Check port 8000 availability.")
             return None
 
         print_success("Backend server started")
@@ -193,37 +202,16 @@ def start_backend(pipeline_mode: str = "both"):
         return None
 
 def start_frontend():
-    """Start the React frontend"""
+    """Start the React frontend with multi-threaded log capture"""
     print_header("Starting Frontend Development Server")
 
     frontend_dir = Path(__file__).parent / "Frontend"
-
     if not frontend_dir.exists():
         print_error(f"Frontend directory not found: {frontend_dir}")
         return None
 
-    # Check if node_modules exists
-    node_modules = frontend_dir / "node_modules"
     npm_command = 'npm.cmd' if sys.platform == "win32" else 'npm'
-
-    if not node_modules.exists():
-        print_warning("node_modules not found. Installing dependencies...")
-        print_info("This may take a few minutes...")
-
-        try:
-            install_proc = subprocess.run(
-                [npm_command, 'install'],
-                cwd=frontend_dir,
-                check=True,
-                shell=True
-            )
-            print_success("Dependencies installed")
-        except subprocess.CalledProcessError as e:
-            print_error(f"Failed to install dependencies: {e}")
-            return None
-
-    print_info(f"Frontend directory: {frontend_dir}")
-    print_info("Starting Vite dev server (typically http://localhost:5173)")
+    print_info(f"Starting Vite dev server on http://localhost:5173")
 
     try:
         # Start frontend
@@ -238,10 +226,13 @@ def start_frontend():
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         )
 
+        # Start log reader thread
+        threading.Thread(target=reader_thread, args=("Frontend", proc.stdout, log_queue), daemon=True).start()
+
         # Wait a bit and check if it started successfully
         time.sleep(2)
         if proc.poll() is not None:
-            print_error("Frontend failed to start")
+            print_error("Frontend failed to start immediately. Check port 5173 availability.")
             return None
 
         print_success("Frontend server started")
@@ -251,54 +242,47 @@ def start_frontend():
         return None
 
 def monitor_processes():
-    """Monitor all processes and display their output"""
+    """Monitor all processes and display their output from the thread-safe queue"""
     print_header("All Services Running")
-
     print(f"{Colors.OKGREEN}✓ Backend API: http://localhost:8000{Colors.ENDC}")
     print(f"{Colors.OKGREEN}✓ Frontend UI: http://localhost:5173{Colors.ENDC}")
-    print(f"{Colors.OKGREEN}✓ API Docs: http://localhost:8000/docs{Colors.ENDC}")
-
     print(f"\n{Colors.WARNING}Press Ctrl+C to stop all services{Colors.ENDC}\n")
     print("="*60)
+
+    # Use a small buffer to store recent logs for crash diagnostics
+    recent_logs = {name: [] for name, _ in processes}
 
     try:
         while True:
             # Check if any process has died
             for name, proc in processes:
                 if proc and proc.poll() is not None:
-                    print_error(f"\n{name} has stopped unexpectedly!")
-
-                    # Try to get output
-                    try:
-                        output, _ = proc.communicate(timeout=1)
-                        if output:
-                            print(f"\nLast output from {name}:")
-                            print(output[-1000:])  # Last 1000 chars
-                    except:
-                        pass
-
+                    print_error(f"\n{name} has CRASHED! (Exit code: {proc.returncode})")
+                    
+                    if recent_logs[name]:
+                        print_warning(f"Last 5 lines of {name} output:")
+                        for line in recent_logs[name][-5:]:
+                            print(f"  [{name}] {line}")
+                    
                     cleanup()
                     return
 
-            # Display output from processes (non-blocking)
-            for name, proc in processes:
-                if proc and proc.stdout:
-                    try:
-                        # Non-blocking read
-                        import select
-                        if sys.platform != "win32":
-                            ready, _, _ = select.select([proc.stdout], [], [], 0)
-                            if ready:
-                                line = proc.stdout.readline()
-                                if line:
-                                    print(f"[{name}] {line.rstrip()}")
-                    except:
-                        pass
+            # Process any logs in the queue (Non-blocking)
+            try:
+                while True:
+                    name, line = log_queue.get_nowait()
+                    if line:
+                        print(f"[{name}] {line}")
+                        recent_logs[name].append(line)
+                        if len(recent_logs[name]) > 50:
+                            recent_logs[name].pop(0)
+                    log_queue.task_done()
+            except queue.Empty:
+                pass
 
-            time.sleep(0.1)
+            time.sleep(0.1) # Main loop is now very lightweight
 
     except KeyboardInterrupt:
-        print("\n")
         cleanup()
 
 def main():
@@ -308,69 +292,44 @@ def main():
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, cleanup)
 
-    print_header("HSIL Hackathon 2026 - System Launcher")
+    print_header("HSIL Hackathon 2026 - Stable System Launcher")
 
     # Check dependencies
     if not check_dependencies():
-        print_error("\nPlease install missing dependencies and try again")
-        print_info("For Python packages: pip install -r requirements.txt")
-        print_info("For Node.js: Download from https://nodejs.org/")
         sys.exit(1)
 
-    # Select experiment
-    experiment_choice = select_experiment()
+    # Automatic pipeline mode
+    pipeline_mode = os.getenv("HSIL_PIPELINE_MODE", "experiment1")
 
-    pipeline_mode = {
-        1: "experiment1",
-        2: "experiment2",
-        3: "both",
-        4: "none",
-    }.get(experiment_choice, "both")
+    # Aggressive port cleaning
+    print_info("Performing pre-startup cleanup...")
+    kill_port(8000)
+    kill_port(5173)
 
-    # Start backend
+    # Start services
     backend_proc = start_backend(pipeline_mode)
     if backend_proc:
         processes.append(("Backend", backend_proc))
     else:
-        print_error("Failed to start backend. Exiting.")
         cleanup()
         return
 
-    # Wait for backend to be fully ready
-    print_info("Waiting for backend to initialize...")
-    time.sleep(3)
+    time.sleep(2)
 
-    # Start frontend
     frontend_proc = start_frontend()
     if frontend_proc:
         processes.append(("Frontend", frontend_proc))
     else:
-        print_error("Failed to start frontend. Stopping backend.")
         cleanup()
         return
 
-    # Wait for frontend to be fully ready
-    print_info("Waiting for frontend to build...")
-    time.sleep(5)
-
-    # Start selected experiment(s)
-    if experiment_choice == 1:
-        print_info("Experiment 1 mode active: /api/v1/analyze will use RadFlow pipeline")
-    elif experiment_choice == 2:
-        print_info("Experiment 2 mode active: /api/v1/analyze will use Foveal pipeline")
-    elif experiment_choice == 3:
-        print_info("Both experiment mode active: RadFlow + Foveal available")
-    else:
-        print_info("AI analysis disabled mode active (UI + backend only)")
-
-    # Monitor all processes
     monitor_processes()
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print_error(f"Unexpected error: {e}")
+        print_error(f"Unexpected launcher error: {e}")
         import traceback
         traceback.print_exc()
         cleanup()
