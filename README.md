@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # HSIL Hackathon 2026 - RadFlow-Edge & Foveal Engine
 
 > **AI-Powered Radiological Triage System for Resource-Constrained Environments**
