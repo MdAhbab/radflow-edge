@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # HSIL Hackathon 2026 - RadFlow-Edge & Foveal Engine
 
 > **AI-Powered Radiological Triage System for Resource-Constrained Environments**
@@ -288,3 +289,7 @@ MIT License - Harvard HSIL Hackathon 2026
 ## Team
 
 Built for the Harvard Health Systems Innovation Lab Hackathon 2026
+=======
+# hsil
+This is made for hsil hackathon
+>>>>>>> d09c0474e139c00492cee7a45685354daad9eb1a
