@@ -286,10 +286,6 @@ Check CORS origins in `backend/main.py` match your frontend URL.
 
 MIT License - Harvard HSIL Hackathon 2026
 
-## Team
+## Team Radflow Bangladesh
 
 Built for the Harvard Health Systems Innovation Lab Hackathon 2026
-=======
-# hsil
-This is made for hsil hackathon
->>>>>>> d09c0474e139c00492cee7a45685354daad9eb1a
