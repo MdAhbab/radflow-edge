@@ -1,0 +1,92 @@
+# --- Environment & Secrets ---
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.python-version
+build/
+dist/
+site/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# --- Python tooling / tests ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Frontend / Node ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+.yarn/
+.next/
+.turbo/
+.pnp
+.pnp.js
+Frontend/.vite/
+Frontend/dist/
+
+# --- IDE / Editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# --- Runtime artifacts ---
+*.log
+logs/
+.cache/
+tmp/
+temp/
+
+# --- Databases (keep local DBs out of Git) ---
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# --- Project-specific large/generated assets ---
+Models/
+models/
+imagedata/
+dataset/
+chroma_db/

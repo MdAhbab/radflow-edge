@@ -1,0 +1,70 @@
+# =============================================================================
+# HSIL Hackathon 2026 - RadFlow-Edge & Foveal Engine
+# Cross-Platform Requirements (Windows/Mac/Linux, Intel ARC/NVIDIA/Apple Silicon)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Core PyTorch - Install separately based on your hardware:
+#
+# For Intel ARC GPU (Windows):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install intel-extension-for-pytorch
+#
+# For NVIDIA GPU:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# For Apple Silicon (Mac M1/M2/M3):
+#   pip install torch torchvision torchaudio
+#
+# For CPU only:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# -----------------------------------------------------------------------------
+
+# Vision & AI Models
+torchxrayvision
+transformers>=4.40.0
+accelerate
+einops
+safetensors
+
+# 4-bit Quantization (NVIDIA only - skip on Intel/Mac)
+# bitsandbytes  # Uncomment ONLY if you have NVIDIA GPU
+
+# Medical & Imaging
+pydicom
+pillow
+opencv-python
+numpy<2.0
+pytorch-grad-cam
+
+# RAG & Vector Database
+chromadb
+sentence-transformers
+
+# Backend API (FastAPI - lightweight, async)
+fastapi
+uvicorn[standard]
+python-multipart
+aiofiles
+
+# CORS for frontend connection
+# (included in fastapi)
+
+# Utilities
+pydantic>=2.0
+python-dotenv
+tqdm
+requests
+sqlalchemy
+alembic
+pytest
+
+# -----------------------------------------------------------------------------
+# Platform-Specific (Install manually if needed):
+#
+# Intel ARC GPU acceleration:
+#   pip install intel-extension-for-pytorch
+#
+# Apple Silicon optimization:
+#   pip install mlx mlx-vlm
+# -----------------------------------------------------------------------------
