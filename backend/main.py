@@ -10,6 +10,8 @@ import tempfile
 import traceback
 import hashlib
 import importlib.util
+import re
+import requests
 from datetime import timedelta
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -242,8 +244,18 @@ def _extract_top_pathology(analysis: Dict[str, Any]) -> str:
     findings = analysis.get("findings") or []
     if findings and isinstance(findings, list):
         return str(findings[0].get("disease") or "unknown")
-    summary = str(analysis.get("summary") or "unknown")
-    return summary[:150]
+    summary = str(analysis.get("summary") or "").strip()
+    if not summary:
+        return "unknown"
+
+    top_match = re.search(r"top\s*finding\s*:\s*([^\n|]+)", summary, flags=re.IGNORECASE)
+    if top_match:
+        return top_match.group(1).strip()[:150]
+
+    if "no significant abnormalities" in summary.lower():
+        return "no significant abnormalities"
+
+    return "unknown"
 
 
 def _confidence_bucket(conf: float) -> str:
@@ -586,6 +598,228 @@ def _priority_from_confidence(conf: float) -> tuple[str, str]:
     return "green", "routine"
 
 
+_REPORT_SECTION_ALIASES: Dict[str, List[str]] = {
+    "key_findings": [
+        "KEY FINDINGS",
+        "TOP FINDING",
+        "MEDICAL FINDINGS",
+        "FINDINGS",
+        "IMPRESSION",
+        "SUMMARY",
+        "CONFIRMATION & SEVERITY",
+        "CONFIRMATION AND SEVERITY",
+    ],
+    "differential_diagnosis": [
+        "DIFFERENTIAL DIAGNOSTICS",
+        "DIFFERENTIAL DIAGNOSIS",
+        "DIFFERENTIALS",
+        "DIFFERENTIAL",
+    ],
+    "future_steps": [
+        "FUTURE STEPS/PRECAUTIONS",
+        "FUTURE STEPS AND PRECAUTIONS",
+        "FUTURE STEPS",
+        "NEXT STEPS",
+        "RECOMMENDED STEPS",
+        "RECOMMENDATIONS",
+        "PLAN",
+        "SAFETY & RISKS",
+        "SAFETY AND RISKS",
+    ],
+}
+
+_ALL_REPORT_HEADERS = sorted(
+    {
+        alias
+        for aliases in _REPORT_SECTION_ALIASES.values()
+        for alias in aliases
+    },
+    key=len,
+    reverse=True,
+)
+
+
+def _clean_optional_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).replace("\r\n", "\n").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip(" \n\t:-")
+    return text or None
+
+
+def _extract_report_section(report_text: Optional[str], aliases: List[str]) -> Optional[str]:
+    text = _clean_optional_text(report_text)
+    if not text:
+        return None
+
+    escaped_aliases = "|".join(re.escape(alias) for alias in sorted(set(aliases), key=len, reverse=True))
+    escaped_headers = "|".join(re.escape(header) for header in _ALL_REPORT_HEADERS)
+
+    block_pattern = re.compile(
+        rf"(?is)(?:^|\n)\s*(?:[#>*-]\s*)?(?:{escaped_aliases})\s*:?\s*(.*?)(?=(?:\n\s*(?:[#>*-]\s*)?(?:{escaped_headers})\s*:?)|\Z)"
+    )
+    match = block_pattern.search(text)
+    if not match:
+        inline_pattern = re.compile(
+            rf"(?is)(?:{escaped_aliases})\s*:?\s*(.*?)(?=(?:{escaped_headers})\s*:?|\Z)"
+        )
+        match = inline_pattern.search(text)
+
+    if not match:
+        return None
+
+    section_value = _clean_optional_text(match.group(1))
+    if not section_value:
+        return None
+
+    if section_value.lower().startswith("none"):
+        return None
+    return section_value
+
+
+def _default_key_findings(top_pathology: str, confidence: float, status: str) -> str:
+    if status in {"normal", "disabled"} or not top_pathology or top_pathology == "unknown":
+        return "No focal acute cardiopulmonary abnormality is identified on the current AI-assisted review."
+
+    confidence_pct = round(confidence * 100.0, 1)
+    return (
+        f"Radiographic pattern is most consistent with {top_pathology}. "
+        f"Estimated model confidence is {confidence_pct:.1f}%."
+    )
+
+
+def _default_differential(top_pathology: str, status: str) -> str:
+    if status in {"normal", "disabled"} or not top_pathology or top_pathology == "unknown":
+        return (
+            "No high-confidence acute radiographic differential is identified on imaging alone; "
+            "recommend clinicoradiologic correlation."
+        )
+    return (
+        f"Primary: {top_pathology}. "
+        "Secondary considerations include infectious, inflammatory, and cardiogenic/edematous etiologies depending on symptom profile and laboratory correlation."
+    )
+
+
+def _default_future_steps(status: str, confidence: float) -> str:
+    if status in {"normal", "disabled"}:
+        return (
+            "- Correlate with clinical history, physical examination, and baseline laboratory profile.\n"
+            "- Repeat chest imaging if respiratory symptoms persist, worsen, or fail to resolve.\n"
+            "- Escalate for urgent specialist review if red-flag deterioration occurs (hypoxia, chest pain, progressive dyspnea)."
+        )
+
+    urgency_line = "- Arrange urgent specialist review and close monitoring." if confidence >= 0.55 else "- Perform short-interval clinical follow-up with repeat imaging."
+    return (
+        "- Correlate imaging findings with physical examination, vital-sign trend, and laboratory profile.\n"
+        f"{urgency_line}\n"
+        "- Provide documented safety-net precautions (worsening dyspnea, chest pain, hypoxia) with clear return-to-care instructions."
+    )
+
+
+def _medicalize_key_findings(section_text: Optional[str], top_pathology: str, confidence: float, status: str) -> str:
+    text = _clean_optional_text(section_text)
+    if not text:
+        return _default_key_findings(top_pathology, confidence, status)
+
+    text = re.sub(r"\bgenerated\s+using\b.*$", "", text, flags=re.IGNORECASE).strip(" .")
+    text = re.sub(r"^top\s*finding\s*:\s*", "", text, flags=re.IGNORECASE).strip(" .")
+    text = re.sub(r"\((0?\.\d+)\)", "", text).strip(" .")
+
+    if not text:
+        return _default_key_findings(top_pathology, confidence, status)
+
+    confidence_pct = round(confidence * 100.0, 1)
+    if "confidence" not in text.lower() and status not in {"normal", "disabled"}:
+        return f"Radiographic pattern is most consistent with {text}. Estimated model confidence is {confidence_pct:.1f}%."
+    return text
+
+
+def _normalize_top_pathology_label(top_pathology: str) -> str:
+    text = _clean_optional_text(top_pathology) or "unknown"
+    text = re.sub(r"^(top\s+finding\s*:\s*)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(exp\d\s*:\s*)", "", text, flags=re.IGNORECASE)
+    text = text.strip(" .")
+    return text or "unknown"
+
+
+def _compose_structured_report(
+    key_findings: str,
+    differential_diagnosis: str,
+    future_steps: str,
+    raw_report_text: Optional[str],
+) -> str:
+    structured = (
+        "KEY FINDINGS:\n"
+        f"{key_findings}\n\n"
+        "DIFFERENTIAL DIAGNOSTICS:\n"
+        f"{differential_diagnosis}\n\n"
+        "FUTURE STEPS/PRECAUTIONS:\n"
+        f"{future_steps}"
+    )
+
+    clean_raw = _clean_optional_text(raw_report_text)
+    if not clean_raw:
+        return structured
+
+    uppercase_raw = clean_raw.upper()
+    has_structured_headers = (
+        "KEY FINDINGS" in uppercase_raw
+        and "DIFFERENTIAL" in uppercase_raw
+        and ("FUTURE STEPS" in uppercase_raw or "NEXT STEPS" in uppercase_raw)
+    )
+    if has_structured_headers:
+        return clean_raw
+
+    return f"{structured}\n\nMODEL NARRATIVE:\n{clean_raw}"
+
+
+def _normalize_analysis_report_sections(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(analysis.get("status") or "")
+    if status == "disabled":
+        return analysis
+
+    top_pathology = _normalize_top_pathology_label(_extract_top_pathology(analysis))
+    confidence = float(analysis.get("confidence", 0.0) or 0.0)
+    raw_report = _clean_optional_text(analysis.get("aiDraftReport"))
+
+    key_findings = _extract_report_section(raw_report, _REPORT_SECTION_ALIASES["key_findings"])
+    key_findings = _medicalize_key_findings(key_findings, top_pathology, confidence, status)
+
+    differential_diagnosis = _clean_optional_text(analysis.get("differentialDiagnosis"))
+    if not differential_diagnosis:
+        differential_diagnosis = _extract_report_section(raw_report, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+    if not differential_diagnosis:
+        differential_diagnosis = _default_differential(top_pathology, status)
+
+    future_steps = _clean_optional_text(analysis.get("recommendedSteps"))
+    if not future_steps:
+        future_steps = _extract_report_section(raw_report, _REPORT_SECTION_ALIASES["future_steps"])
+    if not future_steps:
+        future_steps = _default_future_steps(status, confidence)
+
+    analysis["differentialDiagnosis"] = differential_diagnosis
+    analysis["recommendedSteps"] = future_steps
+    analysis["aiDraftReport"] = _compose_structured_report(
+        key_findings=key_findings,
+        differential_diagnosis=differential_diagnosis,
+        future_steps=future_steps,
+        raw_report_text=raw_report,
+    )
+
+    metadata = analysis.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        analysis["metadata"] = metadata
+    metadata["reportSections"] = {
+        "keyFindings": key_findings,
+        "differentialDiagnostics": differential_diagnosis,
+        "futureStepsPrecautions": future_steps,
+    }
+
+    return analysis
+
+
 def _write_temp_png_from_array(image_array) -> str:
     import cv2
 
@@ -693,6 +927,8 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
             "triageColor": "green",
             "priority": "routine",
             "aiDraftReport": "No significant findings by RadFlow detector.",
+            "differentialDiagnosis": None,
+            "recommendedSteps": None,
             "metadata": {
                 "detector": "torchxrayvision:densenet121-res224-all",
                 "inference_backend": f"torchxrayvision:{detector.device}",
@@ -747,6 +983,10 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
     analyzer = _get_exp1_analyzer_optional()
     analyzer_state = f"unavailable: {_exp1_analyzer_error}" if _exp1_analyzer_error else "unavailable"
     analysis_ms = 0.0
+    
+    differential_diagnosis = None
+    recommended_steps = None
+
     if analyzer is not None and crops:
         try:
             analysis_start = time.perf_counter()
@@ -757,6 +997,15 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
                 rag_context="",
             )
             analysis_ms = (time.perf_counter() - analysis_start) * 1000.0
+            
+            ddx = _extract_report_section(analysis_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+            if ddx:
+                differential_diagnosis = ddx
+
+            steps = _extract_report_section(analysis_text, _REPORT_SECTION_ALIASES["future_steps"])
+            if steps:
+                recommended_steps = steps
+
             finding_items[0]["report"] = analysis_text
             analyzer_state = "loaded"
         except Exception as ex:
@@ -779,6 +1028,8 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
         "triageColor": triage_color,
         "priority": priority,
         "aiDraftReport": report_text,
+        "differentialDiagnosis": differential_diagnosis,
+        "recommendedSteps": recommended_steps,
         "metadata": {
             "detector": "torchxrayvision:densenet121-res224-all",
             "inference_backend": f"torchxrayvision:{detector.device}",
@@ -913,6 +1164,9 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
         f"Primary region at bbox ({start_x}, {start_y}, {end_x}, {end_y}). "
         f"Approx token reduction: {compression_ratio * 100:.1f}%."
     )
+    
+    differential_diagnosis = None
+    recommended_steps = None
 
     if confidence > 0:
         report = (
@@ -934,6 +1188,15 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
                 rag_context="Foveal preprocessing + detector consensus",
             )
             analysis_ms = (time.perf_counter() - analysis_start) * 1000.0
+            
+            ddx = _extract_report_section(analyzer_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+            if ddx:
+                differential_diagnosis = ddx
+
+            steps = _extract_report_section(analyzer_text, _REPORT_SECTION_ALIASES["future_steps"])
+            if steps:
+                recommended_steps = steps
+
             report = analyzer_text
             analyzer_state = "loaded"
         except Exception as ex:
@@ -968,6 +1231,8 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
         "triageColor": triage_color,
         "priority": priority,
         "aiDraftReport": report,
+        "differentialDiagnosis": differential_diagnosis,
+        "recommendedSteps": recommended_steps,
         "metadata": {
             "compression_ratio": compression_ratio,
             "inference_backend": f"torchxrayvision:{detector.device}",
@@ -1004,7 +1269,7 @@ def _run_active_pipeline(image_path: str, patient_context: str = "") -> Dict[str
         }
 
     if mode == "experiment2":
-        return _run_experiment2(image_path, patient_context)
+        return _normalize_analysis_report_sections(_run_experiment2(image_path, patient_context))
 
     if mode == "both":
         exp2 = _run_experiment2(image_path, patient_context)
@@ -1012,7 +1277,7 @@ def _run_active_pipeline(image_path: str, patient_context: str = "") -> Dict[str
             exp1 = _run_experiment1(image_path, patient_context)
             best_conf = max(float(exp1.get("confidence", 0)), float(exp2.get("confidence", 0)))
             triage_color, priority = _priority_from_confidence(best_conf)
-            return {
+            combined = {
                 "engine": "both",
                 "status": "success",
                 "findings": exp1.get("findings", []) + exp2.get("findings", []),
@@ -1021,14 +1286,17 @@ def _run_active_pipeline(image_path: str, patient_context: str = "") -> Dict[str
                 "triageColor": triage_color,
                 "priority": priority,
                 "aiDraftReport": f"{exp1.get('aiDraftReport', '')}\n\n{exp2.get('aiDraftReport', '')}".strip(),
+                "differentialDiagnosis": exp1.get("differentialDiagnosis") or exp2.get("differentialDiagnosis"),
+                "recommendedSteps": exp1.get("recommendedSteps") or exp2.get("recommendedSteps"),
                 "metadata": {"exp1": exp1.get("metadata", {}), "exp2": exp2.get("metadata", {})},
             }
+            return _normalize_analysis_report_sections(combined)
         except Exception as ex:
             exp2["metadata"]["exp1_error"] = str(ex)
-            return exp2
+            return _normalize_analysis_report_sections(exp2)
 
     # Default: experiment1
-    return _run_experiment1(image_path, patient_context)
+    return _normalize_analysis_report_sections(_run_experiment1(image_path, patient_context))
 
 
 def _enrich_analysis(
@@ -1125,6 +1393,12 @@ def _apply_analysis_to_case(db_case: Case, analysis: Dict[str, Any], db: Session
     db_case.triage_color = analysis.get("triageColor", "green")
     db_case.priority = analysis.get("priority", "routine")
     db_case.ai_draft_report = analysis.get("aiDraftReport")
+    
+    if "differentialDiagnosis" in analysis:
+        db_case.differential_diagnosis = analysis.get("differentialDiagnosis")
+    if "recommendedSteps" in analysis:
+        db_case.recommended_steps = analysis.get("recommendedSteps")
+        
     db_case.ai_status = "complete" if analysis.get("status") in ("success", "normal") else "ready"
 
     # Replace findings for this case with latest analysis output
@@ -2388,30 +2662,198 @@ def foveal_preprocess(data: Dict[Any, Any]):
         "cropShape": list(results["foveal_crop"].shape),
     }
 
+
+def _truncate_prompt_text(text: Optional[str], max_len: int = 1500) -> str:
+    cleaned = _clean_optional_text(text) or ""
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len] + "..."
+
+
+def _get_preferred_copilot_model() -> str:
+    return os.getenv("HSIL_COPILOT_MODEL", "gemma4:e2b")
+
+
+def _pick_available_ollama_model(preferred: str, base_url: str) -> str:
+    try:
+        resp = requests.get(f"{base_url}/api/tags", timeout=3)
+        resp.raise_for_status()
+        payload = resp.json()
+        names = [str(item.get("name") or "") for item in payload.get("models", []) if item.get("name")]
+        lower_names = [name.lower() for name in names]
+
+        preferred_l = preferred.lower()
+        if preferred_l in lower_names:
+            return names[lower_names.index(preferred_l)]
+
+        candidates = [
+            "gemma4:e2b",
+            "gemma3n:e2b",
+            "gemma3:2b",
+            "gemma2:2b",
+            "gemma:2b",
+        ]
+        for cand in candidates:
+            if cand in lower_names:
+                return names[lower_names.index(cand)]
+
+        for idx, name in enumerate(lower_names):
+            if "gemma" in name and ("e2b" in name or "2b" in name):
+                return names[idx]
+        for idx, name in enumerate(lower_names):
+            if "gemma" in name:
+                return names[idx]
+    except Exception:
+        pass
+    return preferred
+
+
+def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> Dict[str, str]:
+    base_url = os.getenv("HSIL_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    preferred_model = _get_preferred_copilot_model()
+    model_name = _pick_available_ollama_model(preferred_model, base_url)
+
+    system_prompt = (
+        "You are HSIL Clinical Copilot. Respond for clinicians reviewing a chest X-ray case. "
+        "Use concise, clinically appropriate language with practical suggestions. "
+        "Prefer percentages for confidence when present. "
+        "Base your answer strictly on supplied case context. "
+        "If data is missing, explicitly say what is missing and what to verify next."
+    )
+
+    user_prompt = (
+        "CASE CONTEXT (JSON):\n"
+        f"{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+        "CLINICIAN QUESTION:\n"
+        f"{message}\n\n"
+        "Respond with: 1) direct answer, 2) short rationale, 3) suggested next actions."
+    )
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "top_p": 0.9,
+        },
+    }
+
+    resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    content = str((data.get("message") or {}).get("content") or "").strip()
+    if not content:
+        raise RuntimeError("Ollama returned an empty response")
+    return {"model": model_name, "response": content}
+
+
+def _build_case_copilot_context(db: Session, patient_id: str) -> Optional[Dict[str, Any]]:
+    case_obj = (
+        db.query(Case)
+        .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
+        .order_by(Case.id.desc())
+        .first()
+    )
+    if case_obj is None:
+        return None
+
+    findings = (
+        db.query(Finding)
+        .filter(Finding.case_id == patient_id, Finding.is_deleted == 0)
+        .order_by(Finding.confidence.desc())
+        .all()
+    )
+    findings_payload: List[Dict[str, Any]] = []
+    for item in findings[:6]:
+        findings_payload.append(
+            {
+                "disease": item.disease,
+                "confidence": round(float(item.confidence or 0.0) * 100.0, 1),
+                "report": _truncate_prompt_text(item.report, max_len=350),
+                "bbox": [item.bbox_x1, item.bbox_y1, item.bbox_x2, item.bbox_y2],
+            }
+        )
+
+    latest_ledger = (
+        db.query(InferenceLedger)
+        .filter(InferenceLedger.case_id == patient_id)
+        .order_by(InferenceLedger.created_at.desc())
+        .first()
+    )
+
+    return {
+        "patientId": case_obj.patient_id,
+        "name": case_obj.name,
+        "age": case_obj.age,
+        "sex": case_obj.sex,
+        "studyType": case_obj.study_type,
+        "complaint": _truncate_prompt_text(case_obj.complaint, 300),
+        "clinicalNotes": _truncate_prompt_text(case_obj.clinical_notes, 600),
+        "riskFactors": _truncate_prompt_text(case_obj.risk_factors, 400),
+        "aiStatus": case_obj.ai_status,
+        "triageColor": case_obj.triage_color,
+        "priority": case_obj.priority,
+        "confidencePercent": round(float(case_obj.confidence or 0.0) * (100.0 if float(case_obj.confidence or 0.0) <= 1.0 else 1.0), 1),
+        "differentialDiagnosis": _truncate_prompt_text(case_obj.differential_diagnosis, 1000),
+        "recommendedSteps": _truncate_prompt_text(case_obj.recommended_steps, 1000),
+        "aiDraftReport": _truncate_prompt_text(case_obj.ai_draft_report, 2000),
+        "vitals": {
+            "temp": case_obj.vital_temp,
+            "hr": case_obj.vital_hr,
+            "bp": case_obj.vital_bp,
+            "resp": case_obj.vital_resp,
+            "spo2": case_obj.vital_spo2,
+            "weight": case_obj.vital_weight,
+        },
+        "findings": findings_payload,
+        "latestInference": {
+            "modelId": latest_ledger.model_id if latest_ledger else None,
+            "calibratedConfidencePercent": round(float(latest_ledger.calibrated_confidence or 0.0) * 100.0, 1) if latest_ledger else None,
+            "riskBand": latest_ledger.risk_band if latest_ledger else None,
+            "policyAction": latest_ledger.policy_action if latest_ledger else None,
+            "consensusState": latest_ledger.consensus_state if latest_ledger else None,
+        },
+        "activeModel": active_ai_model,
+    }
+
 @app.post("/api/v1/chat")
 def chat(data: Dict[Any, Any], db: Session = Depends(get_db)):
     message = str(data.get("message", "")).strip()
     patient_id = data.get("patientId")
 
-    response = "AI Copilot Response"
-    if patient_id:
-        case_obj = db.query(Case).filter(Case.patient_id == patient_id, Case.is_deleted == 0).order_by(Case.id.desc()).first()
-        findings = db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
-        if case_obj and findings:
-            top = max(findings, key=lambda f: f.confidence)
-            response = (
-                f"Active model: {active_ai_model}. "
-                f"Top finding for {patient_id}: {top.disease} ({top.confidence:.2f}). "
-                f"Triage: {case_obj.triage_color}."
-            )
-            if top.report:
-                response += f" Report snippet: {top.report[:400]}"
-        elif case_obj and case_obj.ai_draft_report:
-            response = f"Active model: {active_ai_model}. Draft report: {case_obj.ai_draft_report[:500]}"
-        elif message:
-            response = f"Active model is {active_ai_model}. No findings saved yet for {patient_id}."
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
 
-    return {"response": response}
+    if not patient_id:
+        return {
+            "response": (
+                "Please open a case first so I can answer with patient-specific context from the database."
+            )
+        }
+
+    case_context = _build_case_copilot_context(db, str(patient_id))
+    if case_context is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    try:
+        model_result = _call_ollama_case_copilot(message, case_context)
+        return {
+            "response": model_result["response"],
+            "model": model_result["model"],
+            "activeModel": active_ai_model,
+        }
+    except Exception as ex:
+        fallback = (
+            "Copilot fallback: local Gemma/Ollama is unavailable right now. "
+            f"Current triage is {case_context.get('triageColor')} with confidence {case_context.get('confidencePercent')}%. "
+            "Please verify key findings, differential diagnosis, and recommended steps in the report card while Ollama is restarting. "
+            f"Technical detail: {str(ex)[:200]}"
+        )
+        return {"response": fallback, "activeModel": active_ai_model}
 
 @app.post("/api/v1/upload")
 async def upload_image(file: UploadFile = File(...)):

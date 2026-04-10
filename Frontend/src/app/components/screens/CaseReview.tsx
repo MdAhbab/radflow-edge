@@ -25,6 +25,7 @@ import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { api, CaseData, FindingData } from "../../../api";
 import { toast } from "sonner";
+import { parseReportSections, summarizeForCard, toPercent } from "../../../reportSections";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -156,6 +157,17 @@ export function CaseReview() {
   };
 
   const recommendedSteps = parseRecommendedSteps(caseData?.recommendedSteps);
+  const parsedReportSections = parseReportSections(caseData?.aiDraftReport);
+  const fallbackKeyFindings = topFinding?.disease
+    ? `${topFinding.disease.replace(/_/g, " ")} detected with estimated confidence ${toPercent(topFinding.confidence)}.`
+    : "AI findings are available. Review differential diagnosis and recommended actions below.";
+  const keyFindingsForCard = summarizeForCard(parsedReportSections.keyFindings || fallbackKeyFindings, 260);
+  const differentialForCard = caseData?.differentialDiagnosis || parsedReportSections.differentialDiagnostics || "";
+  const modelNarrativeForCard = parsedReportSections.modelNarrative || "";
+  const recommendedStepsForCard =
+    recommendedSteps.length > 0
+      ? recommendedSteps
+      : parseRecommendedSteps(parsedReportSections.futureStepsPrecautions || "");
 
   const handlePromptChip = async (prompt: string) => {
     if (!patientId) return;
@@ -711,8 +723,9 @@ export function CaseReview() {
                   </CardHeader>
                   <CardContent>
                     <p className="text-sm text-red-800 leading-relaxed">
-                      {topFinding?.report || caseData.aiDraftReport || "AI analysis is complete. Review findings and proceed with clinical decision making."}
+                      {keyFindingsForCard}
                     </p>
+                    <p className="text-xs text-red-700 mt-2">Current confidence: {toPercent(caseConfidenceRaw)}</p>
                   </CardContent>
                 </Card>
               ) : hasAiOutput ? (
@@ -795,12 +808,12 @@ export function CaseReview() {
                         </Badge>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-600">Risk Band</span>
+                        <span className="text-slate-600">Clinical Risk</span>
                         <Badge variant="outline">{latestLedger.riskBand || "low"}</Badge>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-slate-600">Calibrated Confidence</span>
-                        <span className="font-semibold text-slate-900">{Math.round((latestLedger.calibratedConfidence || 0) * 100)}%</span>
+                        <span className="font-semibold text-slate-900">{toPercent(latestLedger.calibratedConfidence || 0)}</span>
                       </div>
                     </>
                   ) : (
@@ -821,11 +834,11 @@ export function CaseReview() {
                         <span>{Math.round((latestLedger.uncertainty || 0) * 100)}%</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-600">Expected Error Bin</span>
+                        <span className="text-slate-600">Reliability</span>
                         <span className="capitalize">{latestLedger.expectedErrorBin || "n/a"}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-600">Policy Action</span>
+                        <span className="text-slate-600">Suggested Priority</span>
                         <span className="capitalize">{latestLedger.policyAction || "no_change"}</span>
                       </div>
                     </>
@@ -856,9 +869,6 @@ export function CaseReview() {
                             <div className="font-medium text-slate-900">{finding.disease.replace(/_/g, " ")}</div>
                             <div className="text-slate-600 text-xs mt-0.5">
                               Confidence: {conf}%
-                              {finding.bbox_x1 != null && finding.bbox_y1 != null && finding.bbox_x2 != null && finding.bbox_y2 != null
-                                ? ` | BBox: (${finding.bbox_x1}, ${finding.bbox_y1})-(${finding.bbox_x2}, ${finding.bbox_y2})`
-                                : ""}
                             </div>
                           </div>
                         </div>
@@ -874,8 +884,8 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium">Differential Diagnosis</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  {caseData.differentialDiagnosis ? (
-                    <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{caseData.differentialDiagnosis}</div>
+                  {differentialForCard ? (
+                    <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{differentialForCard}</div>
                   ) : findings.length > 0 ? (
                     findings.slice(0, 3).map((finding, idx) => (
                       <div key={`ddx-${idx}`} className="flex items-center justify-between">
@@ -895,8 +905,8 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium text-blue-900">Recommended Next Steps</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm text-blue-800">
-                  {recommendedSteps.length > 0 ? (
-                    recommendedSteps.map((step, idx) => (
+                  {recommendedStepsForCard.length > 0 ? (
+                    recommendedStepsForCard.map((step, idx) => (
                       <div key={`step-${idx}`} className="flex items-start gap-2">
                         <span className="shrink-0 font-semibold">{idx + 1}.</span>
                         <span>{step}</span>
@@ -912,10 +922,34 @@ export function CaseReview() {
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-medium">AI Draft Report</CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <div className="text-sm space-y-2 text-slate-700 leading-relaxed">
-                    <div className="whitespace-pre-wrap">{caseData.aiDraftReport || 'AI Draft Report has not been generated for this case.'}</div>
-                  </div>
+                <CardContent className="space-y-3 text-sm text-slate-700 leading-relaxed">
+                  {parsedReportSections.keyFindings && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Key Findings</div>
+                      <div className="whitespace-pre-wrap">{parsedReportSections.keyFindings}</div>
+                    </div>
+                  )}
+                  {parsedReportSections.differentialDiagnostics && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Differential Diagnostics</div>
+                      <div className="whitespace-pre-wrap">{parsedReportSections.differentialDiagnostics}</div>
+                    </div>
+                  )}
+                  {parsedReportSections.futureStepsPrecautions && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Future Steps and Precautions</div>
+                      <div className="whitespace-pre-wrap">{parsedReportSections.futureStepsPrecautions}</div>
+                    </div>
+                  )}
+                  {modelNarrativeForCard && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Model Narrative</div>
+                      <div className="whitespace-pre-wrap">{summarizeForCard(modelNarrativeForCard, 380)}</div>
+                    </div>
+                  )}
+                  {!caseData.aiDraftReport && (
+                    <div>AI Draft Report has not been generated for this case.</div>
+                  )}
                 </CardContent>
               </Card>
             </div>
