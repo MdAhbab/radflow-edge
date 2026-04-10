@@ -23,7 +23,7 @@ import { Separator } from "../ui/separator";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
-import { api, CaseData, FindingData } from "../../../api";
+import { api, getImageUrl, CaseData, FindingData } from "../../../api";
 import { toast } from "sonner";
 
 interface ChatMessage {
@@ -639,7 +639,7 @@ export function CaseReview() {
                 
                 {caseData?.imagePath ? (
                   <img 
-                    src={caseData.imagePath.startsWith("http") ? caseData.imagePath : `http://localhost:8000/${caseData.imagePath}`} 
+                    src={getImageUrl(caseData.imagePath)} 
                     className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
                     alt="Patient Radiograph" 
                     onLoad={handleImageLoad}

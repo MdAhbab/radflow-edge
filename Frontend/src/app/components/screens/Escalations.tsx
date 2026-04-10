@@ -400,19 +400,19 @@ export function Escalations() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-8">
+                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8">
                     <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto" />
                   </TableCell>
                 </TableRow>
               ) : error ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-8 text-red-600">
+                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8 text-red-600">
                     {error}
                   </TableCell>
                 </TableRow>
               ) : filteredCases.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-8 text-slate-500">
+                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8 text-slate-500">
                     No cases in this category
                   </TableCell>
                 </TableRow>

@@ -18,7 +18,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Separator } from "../ui/separator";
-import { api, EscalationData, CaseData } from "../../../api";
+import { api, getImageUrl, EscalationData, CaseData } from "../../../api";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -112,7 +112,58 @@ export function SpecialistReview() {
     }
   };
 
-  const aiDraftReport = caseData?.aiDraftReport || "No AI draft report available for this case.";
+  const handleEditReport = () => {
+    setEditedReport(caseData?.aiDraftReport || "");
+    setEditMode(true);
+  };
+
+  const handleSaveDraft = async () => {
+    if (!patientId) return;
+    try {
+      await api.updateCase(patientId, { aiDraftReport: editedReport || caseData?.aiDraftReport });
+      setCaseData((prev) => prev ? { ...prev, aiDraftReport: editedReport || prev.aiDraftReport } : prev);
+      setEditMode(false);
+      alert("Draft saved successfully.");
+    } catch {
+      alert("Failed to save draft.");
+    }
+  };
+
+  const handleFinalizeReturn = async () => {
+    if (!patientId) return;
+    if (!decisionReason) {
+      alert("Select a reason code before finalising.");
+      return;
+    }
+    try {
+      const finalReport = editMode && editedReport ? editedReport : caseData?.aiDraftReport;
+      await api.updateCase(patientId, { aiDraftReport: finalReport, aiStatus: "complete" });
+      await api.updateEscalation(patientId, {
+        status: "returned",
+        specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
+      });
+      setEditMode(false);
+      alert("Case finalised and returned to clinic.");
+    } catch {
+      alert("Failed to finalise case.");
+    }
+  };
+
+  const handleRecommendTransfer = async () => {
+    if (!patientId) return;
+    try {
+      await api.updateEscalation(patientId, {
+        status: "finalized",
+        specialistNotes: `TRANSFER RECOMMENDED${decisionReason ? ` | ${decisionReason}` : ""}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
+      });
+      await api.updateCase(patientId, { priority: "immediate", triageColor: "red" });
+      alert("Hospital transfer recommended and case escalated.");
+    } catch {
+      alert("Failed to recommend transfer.");
+    }
+  };
+
+  const aiDraftReport = editMode ? editedReport : (caseData?.aiDraftReport || "No AI draft report available for this case.");
   const recommendedSteps = (caseData?.recommendedSteps || "")
     .split(/\n+/)
     .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
@@ -174,15 +225,15 @@ export function SpecialistReview() {
               <CheckCircle className="h-4 w-4 mr-2" />
               Approve Draft
             </Button>
-            <Button variant="outline">
+            <Button variant="outline" onClick={handleEditReport}>
               <FileEdit className="h-4 w-4 mr-2" />
-              Edit Report
+              {editMode ? "Editing…" : "Edit Report"}
             </Button>
             <Button variant="outline" onClick={handleReturn}>
               <ArrowRight className="h-4 w-4 mr-2" />
               Return to Clinic
             </Button>
-            <Button className="bg-red-700 hover:bg-red-800">
+            <Button className="bg-red-700 hover:bg-red-800" onClick={handleRecommendTransfer}>
               <TrendingUp className="h-4 w-4 mr-2" />
               Recommend Transfer
             </Button>
@@ -426,7 +477,7 @@ export function SpecialistReview() {
                 <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
                 {caseData?.imagePath ? (
                   <img
-                    src={caseData.imagePath.startsWith("http") ? caseData.imagePath : `http://localhost:8000/${caseData.imagePath}`}
+                    src={getImageUrl(caseData.imagePath)}
                     className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80"
                     alt="Radiograph"
                   />
@@ -527,7 +578,7 @@ export function SpecialistReview() {
                   <CardTitle className="text-sm font-medium">Recommended Actions</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <Button variant="outline" className="w-full justify-start text-left">
+                  <Button variant="outline" className="w-full justify-start text-left" onClick={handleApprove}>
                     <CheckCircle className="h-4 w-4 mr-2 shrink-0" />
                     <div className="text-sm">
                       <div className="font-medium">Approve AI Draft Report</div>
@@ -535,15 +586,15 @@ export function SpecialistReview() {
                     </div>
                   </Button>
 
-                  <Button variant="outline" className="w-full justify-start text-left">
+                  <Button variant="outline" className="w-full justify-start text-left" onClick={handleEditReport}>
                     <FileEdit className="h-4 w-4 mr-2 shrink-0" />
                     <div className="text-sm">
-                      <div className="font-medium">Edit & Finalize Report</div>
+                      <div className="font-medium">{editMode ? "Cancel Edit" : "Edit & Finalize Report"}</div>
                       <div className="text-xs text-slate-500">Modify AI draft with corrections</div>
                     </div>
                   </Button>
 
-                  <Button variant="outline" className="w-full justify-start text-left">
+                  <Button variant="outline" className="w-full justify-start text-left" onClick={handleReturn}>
                     <ArrowRight className="h-4 w-4 mr-2 shrink-0" />
                     <div className="text-sm">
                       <div className="font-medium">Return to Clinic with Guidance</div>
@@ -551,7 +602,7 @@ export function SpecialistReview() {
                     </div>
                   </Button>
 
-                  <Button variant="outline" className="w-full justify-start text-left border-red-300 text-red-700 hover:bg-red-50">
+                  <Button variant="outline" className="w-full justify-start text-left border-red-300 text-red-700 hover:bg-red-50" onClick={handleRecommendTransfer}>
                     <TrendingUp className="h-4 w-4 mr-2 shrink-0" />
                     <div className="text-sm">
                       <div className="font-medium">Recommend Hospital Transfer</div>
@@ -582,11 +633,11 @@ export function SpecialistReview() {
 
               {/* Finalize Actions */}
               <div className="flex flex-col gap-2 pt-2">
-                <Button className="w-full" size="lg">
+                <Button className="w-full" size="lg" onClick={handleFinalizeReturn}>
                   <Send className="h-4 w-4 mr-2" />
                   Finalize & Return to Clinic
                 </Button>
-                <Button variant="outline" className="w-full">
+                <Button variant="outline" className="w-full" onClick={handleSaveDraft}>
                   Save Draft
                 </Button>
               </div>

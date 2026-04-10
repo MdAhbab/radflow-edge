@@ -227,6 +227,13 @@ export interface ChatResponse {
 }
 
 const API_BASE = "http://localhost:8000/api/v1";
+const API_HOST = "http://localhost:8000";
+
+export function getImageUrl(imagePath: string | null | undefined): string | undefined {
+  if (!imagePath) return undefined;
+  if (imagePath.startsWith("http")) return imagePath;
+  return `${API_HOST}/${imagePath}`;
+}
 const OFFLINE_QUEUE_KEY = "hsil_offline_sync_queue";
 
 const readOfflineQueue = (): OfflineQueueItem[] => {
@@ -337,11 +344,17 @@ export const api = {
   },
 
   async updateEscalation(patientId: string, data: Partial<EscalationData>): Promise<{status: string}> {
+    const payload: Record<string, unknown> = { ...data };
+    // When assignedTo is explicitly undefined/null, tell the backend to clear it
+    if ("assignedTo" in data && (data.assignedTo === undefined || data.assignedTo === null)) {
+      payload.clearAssignedTo = true;
+      delete payload.assignedTo;
+    }
     try {
       const res = await fetch(`${API_BASE}/escalations/${patientId}`, {
         method: "PUT",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(data)
+        body: JSON.stringify(payload)
       });
       if (!res.ok) throw new Error("Failed to update escalation");
       return res.json();
@@ -349,7 +362,7 @@ export const api = {
       enqueueOfflineMutation({
         route: `/escalations/${patientId}`,
         method: "PUT",
-        payload: data,
+        payload,
       });
       return { status: "queued-offline" };
     }

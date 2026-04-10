@@ -109,7 +109,6 @@ except Exception:
     psutil = None
 
 # Setup StaticFiles for uploaded/copied images
-import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 files_dir = os.path.join(BASE_DIR, ".files")
 os.makedirs(files_dir, exist_ok=True)
@@ -1312,6 +1311,13 @@ class CaseUpdateSchema(BaseModel):
     differential_diagnosis: Optional[str] = Field(None, alias="differentialDiagnosis")
     recommended_steps: Optional[str] = Field(None, alias="recommendedSteps")
     ai_draft_report: Optional[str] = Field(None, alias="aiDraftReport")
+    vital_temp: Optional[float] = Field(None, alias="vitalTemp")
+    vital_hr: Optional[int] = Field(None, alias="vitalHr")
+    vital_bp: Optional[str] = Field(None, alias="vitalBp")
+    vital_rr: Optional[int] = Field(None, alias="vitalRr")
+    vital_spo2: Optional[float] = Field(None, alias="vitalSpo2")
+    vital_weight: Optional[float] = Field(None, alias="vitalWeight")
+    doctor_notes: Optional[str] = Field(None, alias="doctorNotes")
 
 class EscalationBase(BaseModel):
     name: str
@@ -1333,9 +1339,13 @@ class EscalationSchema(EscalationBase):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     patientId: str
 
+_UNSET = object()
+
 class EscalationUpdateSchema(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     status: Optional[str] = None
-    assignedTo: Optional[str] = None
+    assignedTo: Optional[str] = Field(default=None)
+    clearAssignedTo: bool = Field(default=False, alias="clearAssignedTo")
     specialistNotes: Optional[str] = None
 
 class StatsResponse(BaseModel):
@@ -1684,7 +1694,8 @@ def get_case_stats(db: Session = Depends(get_db)):
     new_cases = base_q.filter(Case.ai_status == "ready").count()
     urgent = base_q.filter(Case.priority.in_(["High Priority", "urgent", "immediate"])).count()
     escalated = base_q.filter(Case.ai_status == "escalated").count()
-    completed = base_q.filter(Case.ai_status == "complete").count()
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    completed = base_q.filter(Case.ai_status == "complete", Case.created_at >= today_start).count()
     return {"newCases": new_cases, "urgentCases": urgent, "escalatedCases": escalated, "completedToday": completed, "totalCases": total}
 
 @app.get("/api/v1/system/status")
@@ -2110,7 +2121,21 @@ def create_escalation(esc: EscalationCreateSchema, db: Session = Depends(get_db)
         )
     )
     db.commit()
-    return get_escalations(db=db)[-1]  # roughly getting the mapped item back
+    db.refresh(db_esc)
+    return EscalationSchema(
+        patientId=db_esc.patient_id,
+        name=db_esc.name,
+        age=db_esc.age,
+        sex=db_esc.sex,
+        reasonForEscalation=db_esc.reason_for_escalation,
+        priority=db_esc.priority,
+        aiTriage=db_esc.ai_triage,
+        confidence=db_esc.confidence,
+        timeWaiting=db_esc.time_waiting,
+        status=db_esc.status,
+        assignedTo=db_esc.assigned_to,
+        specialistNotes=db_esc.specialist_notes,
+    )
 
 @app.get("/api/v1/escalations/stats")
 def get_escalation_stats(db: Session = Depends(get_db)):
@@ -2128,13 +2153,17 @@ def update_escalation(patient_id: str, esc: EscalationUpdateSchema, db: Session 
     old_status = db_esc.status
     if esc.status is not None:
         db_esc.status = esc.status
-    if esc.assignedTo is not None:
+    if esc.clearAssignedTo:
+        db_esc.assigned_to = None
+    elif esc.assignedTo is not None:
         db_esc.assigned_to = esc.assignedTo
     if esc.specialistNotes is not None:
         db_esc.specialist_notes = esc.specialistNotes
-    if esc.status is not None or esc.assignedTo is not None or esc.specialistNotes is not None:
+    if esc.status is not None or esc.assignedTo is not None or esc.clearAssignedTo or esc.specialistNotes is not None:
         reason_parts: List[str] = []
-        if esc.assignedTo is not None:
+        if esc.clearAssignedTo:
+            reason_parts.append("assigned_to:cleared")
+        elif esc.assignedTo is not None:
             reason_parts.append(f"assigned_to:{esc.assignedTo}")
         if esc.specialistNotes is not None:
             reason_parts.append("specialist_note_updated")
