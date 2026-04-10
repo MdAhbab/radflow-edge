@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
+import { useHeader } from "../AppLayout";
 import { 
   ArrowLeft,
   ZoomIn,
@@ -12,18 +13,20 @@ import {
   Send,
   CheckCircle,
   TrendingUp,
-  Loader2
+  Loader2,
+  FileText
 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Separator } from "../ui/separator";
-import { api, getImageUrl, EscalationData, CaseData } from "../../../api";
+import { api, getImageUrl, EscalationData, CaseData, FindingData } from "../../../api";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
 export function SpecialistReview() {
+  const { setSlots, clearSlots } = useHeader();
   const { patientId } = useParams();
   const [zoom, setZoom] = useState(100);
   const [showAnnotations, setShowAnnotations] = useState(true);
@@ -32,6 +35,10 @@ export function SpecialistReview() {
   const [editMode, setEditMode] = useState(false);
   const [decisionReason, setDecisionReason] = useState("");
   const [historyReports, setHistoryReports] = useState<CaseData[]>([]);
+  const [findings, setFindings] = useState<FindingData[]>([]);
+  const [imageLayout, setImageLayout] = useState({ naturalW: 500, naturalH: 600, displayW: 500, displayH: 600, offsetX: 0, offsetY: 0 });
+  const IMAGE_FRAME_WIDTH = 500;
+  const IMAGE_FRAME_HEIGHT = 600;
 
   // Data fetching state
   const [escalation, setEscalation] = useState<EscalationData | null>(null);
@@ -59,6 +66,8 @@ export function SpecialistReview() {
 
         try {
           const caseResponse = await api.getCase(patientId);
+          const findingsData = await api.getFindings(patientId);
+          setFindings(findingsData);
           setCaseData(caseResponse);
 
           const allHistory = await api.getCases(true);
@@ -78,10 +87,77 @@ export function SpecialistReview() {
     fetchData();
   }, [patientId]);
 
+  useEffect(() => {
+    if (!patientId || !escalation) {
+      clearSlots();
+      return;
+    }
+
+    setSlots({
+      left: (
+        <div className="flex items-center gap-3 min-w-0">
+          <Link
+            to="/dashboard/escalations"
+            className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors duration-150 shrink-0"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
+          <div className="w-px h-5 bg-slate-200 shrink-0" />
+          <div className="flex items-center gap-1.5 text-sm min-w-0 flex-wrap">
+            <span className="font-mono text-xs font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
+              {escalation.patientId}
+            </span>
+            <span className="text-slate-700 font-medium truncate max-w-[140px]">{escalation.name}</span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-500 shrink-0">{escalation.age} / {escalation.sex}</span>
+          </div>
+        </div>
+      ),
+      right: (
+        <div className="flex items-center gap-1.5">
+          <Button variant="outline" size="sm" className="h-8 text-xs text-green-700 border-green-300 hover:bg-green-50" onClick={handleApprove}>
+            <CheckCircle className="h-3.5 w-3.5 mr-1.5" />
+            Approve Draft
+          </Button>
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={editMode ? handleSaveDraft : handleEditReport}>
+            <FileEdit className="h-3.5 w-3.5 mr-1.5" />
+            {editMode ? "Save Changes" : "Edit Report"}
+          </Button>
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={handleReturn}>
+            <ArrowRight className="h-3.5 w-3.5 mr-1.5" />
+            Return to Clinic
+          </Button>
+          <Button variant="outline" size="sm" className="h-8 text-xs border-blue-200 text-blue-700 hover:bg-blue-50" onClick={handleDownloadReport}>
+            <FileText className="h-3.5 w-3.5 mr-1.5" />
+            Download Report
+          </Button>
+          <Button size="sm" className="h-8 text-xs bg-red-700 hover:bg-red-800" onClick={handleRecommendTransfer}>
+            <TrendingUp className="h-3.5 w-3.5 mr-1.5" />
+            Transfer
+          </Button>
+        </div>
+      )
+    });
+
+    return () => clearSlots();
+  }, [patientId, escalation, editMode, setSlots, clearSlots]);
+
+  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    const naturalW = img.naturalWidth || IMAGE_FRAME_WIDTH;
+    const naturalH = img.naturalHeight || IMAGE_FRAME_HEIGHT;
+    const scale = Math.min(IMAGE_FRAME_WIDTH / naturalW, IMAGE_FRAME_HEIGHT / naturalH);
+    const displayW = naturalW * scale;
+    const displayH = naturalH * scale;
+    const offsetX = (IMAGE_FRAME_WIDTH - displayW) / 2;
+    const offsetY = (IMAGE_FRAME_HEIGHT - displayH) / 2;
+    setImageLayout({ naturalW, naturalH, displayW, displayH, offsetX, offsetY });
+  };
+
   const handleApprove = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      alert("Select a reason code before approving.");
+      /* alert */ console.log("Select a reason code before approving.");
       return;
     }
     try {
@@ -89,16 +165,16 @@ export function SpecialistReview() {
         status: "finalized",
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
-      alert("Report approved and finalized");
+      /* alert */ console.log("Report approved and finalized");
     } catch (err) {
-      alert("Failed to approve report");
+      /* alert */ console.log("Failed to approve report");
     }
   };
 
   const handleReturn = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      alert("Select a reason code before returning case.");
+      /* alert */ console.log("Select a reason code before returning case.");
       return;
     }
     try {
@@ -106,9 +182,9 @@ export function SpecialistReview() {
         status: "returned",
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
-      alert("Case returned to clinic");
+      /* alert */ console.log("Case returned to clinic");
     } catch (err) {
-      alert("Failed to return case");
+      /* alert */ console.log("Failed to return case");
     }
   };
 
@@ -123,16 +199,16 @@ export function SpecialistReview() {
       await api.updateCase(patientId, { aiDraftReport: editedReport || caseData?.aiDraftReport });
       setCaseData((prev) => prev ? { ...prev, aiDraftReport: editedReport || prev.aiDraftReport } : prev);
       setEditMode(false);
-      alert("Draft saved successfully.");
+      /* alert */ console.log("Draft saved successfully.");
     } catch {
-      alert("Failed to save draft.");
+      /* alert */ console.log("Failed to save draft.");
     }
   };
 
   const handleFinalizeReturn = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      alert("Select a reason code before finalising.");
+      /* alert */ console.log("Select a reason code before finalising.");
       return;
     }
     try {
@@ -143,9 +219,9 @@ export function SpecialistReview() {
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
       setEditMode(false);
-      alert("Case finalised and returned to clinic.");
+      /* alert */ console.log("Case finalised and returned to clinic.");
     } catch {
-      alert("Failed to finalise case.");
+      /* alert */ console.log("Failed to finalise case.");
     }
   };
 
@@ -157,9 +233,25 @@ export function SpecialistReview() {
         specialistNotes: `TRANSFER RECOMMENDED${decisionReason ? ` | ${decisionReason}` : ""}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
       await api.updateCase(patientId, { priority: "immediate", triageColor: "red" });
-      alert("Hospital transfer recommended and case escalated.");
+      /* alert */ console.log("Hospital transfer recommended and case escalated.");
     } catch {
-      alert("Failed to recommend transfer.");
+      /* alert */ console.log("Failed to recommend transfer.");
+    }
+  };
+
+  const handleDownloadReport = async () => {
+    if (!patientId) return;
+    try {
+      const data = await api.downloadReport(patientId, `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`);
+      const blob = new Blob([data.content], { type: "text/plain" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      /* alert */ console.log("Failed to download report.");
     }
   };
 
@@ -205,50 +297,6 @@ export function SpecialistReview() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-200 px-6 py-4 shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Link
-              to="/dashboard/escalations"
-              title="Back to Escalations"
-              className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900
-                         transition-colors duration-150 shrink-0"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </Link>
-            <Separator orientation="vertical" className="h-5" />
-            <div className="flex items-center gap-1.5 text-sm flex-wrap">
-              <span className="font-mono text-xs font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
-                {escalation.patientId}
-              </span>
-              <span className="text-slate-700 font-medium">{escalation.name}</span>
-              <span className="text-slate-300">·</span>
-              <span className="text-slate-500">{escalation.age} / {escalation.sex}</span>
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <Button variant="outline" className="text-green-700 border-green-300 hover:bg-green-50" onClick={handleApprove}>
-              <CheckCircle className="h-4 w-4 mr-2" />
-              Approve Draft
-            </Button>
-            <Button variant="outline" onClick={handleEditReport}>
-              <FileEdit className="h-4 w-4 mr-2" />
-              {editMode ? "Editing…" : "Edit Report"}
-            </Button>
-            <Button variant="outline" onClick={handleReturn}>
-              <ArrowRight className="h-4 w-4 mr-2" />
-              Return to Clinic
-            </Button>
-            <Button className="bg-red-700 hover:bg-red-800" onClick={handleRecommendTransfer}>
-              <TrendingUp className="h-4 w-4 mr-2" />
-              Recommend Transfer
-            </Button>
-          </div>
-        </div>
-      </div>
-
       {/* Main Content - 3 Panel Layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Patient Context & Escalation Info */}
@@ -484,38 +532,39 @@ export function SpecialistReview() {
               <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden">
                 <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
                 {caseData?.imagePath ? (
-                  <img
-                    src={getImageUrl(caseData.imagePath)}
-                    className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80"
-                    alt="Radiograph"
-                  />
+                  <img src={getImageUrl(caseData.imagePath)} className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" alt="Patient Radiograph" onLoad={handleImageLoad} />
                 ) : (
-                  <svg viewBox="0 0 500 600" className="absolute inset-0 w-full h-full opacity-40">
-                    <ellipse cx="180" cy="300" rx="120" ry="200" fill="#666" />
-                    <ellipse cx="320" cy="300" rx="120" ry="200" fill="#666" />
-                    <rect x="240" y="50" width="20" height="150" fill="#555" />
-                  </svg>
+                  <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
                 )}
 
                 {showAnnotations && (
-                  <>
-                    {/* AI Annotation - Bilateral upper lobe nodules */}
-                    <div className="absolute top-20 right-24 w-40 h-32 border-2 border-orange-400 rounded-lg">
-                      <div className="absolute -top-8 left-0 bg-orange-500 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-                        Upper lobe nodular opacities
-                      </div>
-                    </div>
-                    <div className="absolute top-20 left-20 w-36 h-28 border-2 border-orange-400 rounded-lg">
-                    </div>
-
-                    {/* AI Annotation - Possible PMF */}
-                    <div className="absolute top-32 right-28 w-20 h-24 border-2 border-yellow-400 rounded-lg">
-                      <div className="absolute -bottom-8 -right-8 bg-yellow-500 text-slate-900 text-xs px-2 py-1 rounded whitespace-nowrap">
-                        ? PMF
-                      </div>
-                    </div>
-                  </>
-                )}
+  <>
+    {findings.filter(f => f.bbox_x1 != null && f.bbox_y1 != null && f.bbox_x2 != null && f.bbox_y2 != null).map((finding, idx) => {
+      const x1 = finding.bbox_x1 as number;
+      const y1 = finding.bbox_y1 as number;
+      const x2 = finding.bbox_x2 as number;
+      const y2 = finding.bbox_y2 as number;
+      const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
+      const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
+      const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
+      const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+      const isPrimary = idx === 0;
+      const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
+      const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+      return (
+        <div
+          key={`ann-${idx}-${finding.disease}`}
+          className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
+          style={{ left, top, width, height }}
+        >
+          <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
+            {finding.disease.replace(/_/g, " ")}
+          </div>
+        </div>
+      );
+    })}
+  </>
+)}
 
                 <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
                   <div>{escalation.patientId} | {caseData?.studyType || "--"}</div>

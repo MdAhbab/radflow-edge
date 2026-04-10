@@ -25,11 +25,13 @@ import {
   TableHeader,
   TableRow,
 } from "../ui/table";
+import { useHeader } from "../AppLayout";
 import { api, EscalationData, EscalationStats, EscalationTimelineEvent } from "../../../api";
 import { toast } from "sonner";
 
 
 export function Escalations() {
+  const { setSlots, clearSlots } = useHeader();
   const navigate = useNavigate();
   const [cases, setCases] = useState<EscalationData[]>([]);
   const [stats, setStats] = useState<EscalationStats | null>(null);
@@ -43,6 +45,40 @@ export function Escalations() {
   const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
   const [selectedTimelinePatient, setSelectedTimelinePatient] = useState<string>("");
   const [timelineEvents, setTimelineEvents] = useState<EscalationTimelineEvent[]>([]);
+
+  useEffect(() => {
+    setSlots({
+      left: (
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-violet-50 rounded-lg shrink-0">
+            <TrendingUp className="h-5 w-5 text-violet-600" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-slate-900 tracking-tight leading-none">Specialist Escalations</h1>
+            <p className="text-xs text-slate-500 mt-1 font-medium italic">Radiology Expert Review Queue</p>
+          </div>
+        </div>
+      ),
+      right: (
+        <div className="flex items-center gap-2">
+          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mr-2">
+            {lastUpdatedAt ? `Updated ${secondsSinceUpdate}s ago` : "Syncing..."}
+          </p>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            className="h-9 border-slate-200 text-slate-600 hover:text-slate-900 shadow-sm" 
+            onClick={() => fetchData(true)} 
+            disabled={refreshing || loading}
+          >
+            {refreshing || loading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+            Refresh Queue
+          </Button>
+        </div>
+      )
+    });
+    return () => clearSlots();
+  }, [setSlots, clearSlots, lastUpdatedAt, secondsSinceUpdate, refreshing, loading]);
 
   const computeStatsFromCases = (items: EscalationData[]): EscalationStats => {
     const count = (status: EscalationData["status"]) => items.filter((item) => item.status === status).length;
@@ -272,30 +308,8 @@ export function Escalations() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-200 p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold text-slate-900">Specialist Escalations</h2>
-            <p className="text-sm text-slate-600 mt-1">Cases referred for expert review</p>
-            <p className="text-xs text-slate-500 mt-1">
-              {lastUpdatedAt ? `Last updated ${secondsSinceUpdate}s ago` : "Waiting for first refresh..."}
-            </p>
-          </div>
-          
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => fetchData(true)} disabled={refreshing || loading}>
-              {refreshing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-              Refresh
-            </Button>
-            <Button variant="outline">
-              <Filter className="h-4 w-4 mr-2" />
-              Filters
-            </Button>
-          </div>
-        </div>
-
-        {/* Summary Stats */}
+      {/* Summary Stats */}
+      <div className="bg-white border-b border-slate-200 p-6 space-y-4 shrink-0">
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
             <div className="flex items-center justify-between">

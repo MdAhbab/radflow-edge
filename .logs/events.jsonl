@@ -1,0 +1,7 @@
+{"timestamp": "2026-04-10T16:57:14.885412", "eventType": "analysis_completed", "payload": {"runId": "ae9d90c3666d4183bf63a9ebfa52ec66", "caseId": "PT-BD-MONIR-1", "engine": "both", "status": "success", "latencyMs": 4551.6}}
+{"timestamp": "2026-04-10T17:03:10.902078", "eventType": "analysis_completed", "payload": {"runId": "e29bb504734f42a1b450c413c488f291", "caseId": "PT-NEW-683", "engine": "both", "status": "success", "latencyMs": 4680.4}}
+{"timestamp": "2026-04-10T17:08:24.975263", "eventType": "analysis_completed", "payload": {"runId": "96b1c336127c4d4093d144165afff36a", "caseId": "PT-NEW-856", "engine": "experiment1", "status": "normal", "latencyMs": 4716.1}}
+{"timestamp": "2026-04-10T17:09:03.191320", "eventType": "analysis_completed", "payload": {"runId": "732bde8ffcd4487aad00e6dc6ba2a5ff", "caseId": "PT-NEW-706", "engine": "experiment1", "status": "normal", "latencyMs": 89.4}}
+{"timestamp": "2026-04-10T17:25:36.694606", "eventType": "analysis_completed", "payload": {"runId": "4a8f1b2be5e2455db599ba54a1ecd56e", "caseId": "PT-BD-MONIR-1", "engine": "both", "status": "success", "latencyMs": 4865.4}}
+{"timestamp": "2026-04-10T17:29:44.824227", "eventType": "analysis_completed", "payload": {"runId": "8bdb6d6e1e834dcfaec429e5d2c0a68f", "caseId": "PT-BD-MONIR-1", "engine": "both", "status": "success", "latencyMs": 6429.3}}
+{"timestamp": "2026-04-10T17:30:57.892796", "eventType": "analysis_completed", "payload": {"runId": "1c4fbf01311643e596c44f7926ff16b1", "caseId": "PT-NEW-765", "engine": "experiment1", "status": "success", "latencyMs": 5401.9}}

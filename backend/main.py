@@ -54,7 +54,8 @@ def _load_active_model() -> str:
     except Exception:
         pass
 
-    return "experiment1"
+    # Default: run both detector (Exp1) and foveal (Exp2) on each image unless overridden.
+    return "both"
 
 
 def _persist_active_model(model_id: str) -> None:
@@ -730,6 +731,7 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
                 "report": None,
+                "engine": "experiment1",
             }
         )
 
@@ -740,6 +742,7 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": None,
                 "report": None,
+                "engine": "experiment1",
             }
         )
 
@@ -949,6 +952,7 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": [int(resolved_bbox[0]), int(resolved_bbox[1]), int(resolved_bbox[2]), int(resolved_bbox[3])],
                 "report": report,
+                "engine": "experiment2",
             }
         )
 
@@ -1006,28 +1010,32 @@ def _run_active_pipeline(image_path: str, patient_context: str = "") -> Dict[str
         return _run_experiment2(image_path, patient_context)
 
     if mode == "both":
-        exp2 = _run_experiment2(image_path, patient_context)
-        try:
-            exp1 = _run_experiment1(image_path, patient_context)
-            best_conf = max(float(exp1.get("confidence", 0)), float(exp2.get("confidence", 0)))
-            triage_color, priority = _priority_from_confidence(best_conf)
-            return {
-                "engine": "both",
-                "status": "success",
-                "findings": exp1.get("findings", []) + exp2.get("findings", []),
-                "summary": f"Exp1: {exp1.get('summary', 'n/a')} | Exp2: {exp2.get('summary', 'n/a')}",
-                "confidence": best_conf,
-                "triageColor": triage_color,
-                "priority": priority,
-                "aiDraftReport": f"{exp1.get('aiDraftReport', '')}\n\n{exp2.get('aiDraftReport', '')}".strip(),
-                "metadata": {"exp1": exp1.get("metadata", {}), "exp2": exp2.get("metadata", {})},
-            }
-        except Exception as ex:
-            exp2["metadata"]["exp1_error"] = str(ex)
-            return exp2
+        return _run_both_pipeline(image_path, patient_context)
 
     # Default: experiment1
     return _run_experiment1(image_path, patient_context)
+
+
+def _run_both_pipeline(image_path: str, patient_context: str = "") -> Dict[str, Any]:
+    exp2 = _run_experiment2(image_path, patient_context)
+    try:
+        exp1 = _run_experiment1(image_path, patient_context)
+        best_conf = max(float(exp1.get("confidence", 0)), float(exp2.get("confidence", 0)))
+        triage_color, priority = _priority_from_confidence(best_conf)
+        return {
+            "engine": "both",
+            "status": "success",
+            "findings": exp1.get("findings", []) + exp2.get("findings", []),
+            "summary": f"Exp1: {exp1.get('summary', 'n/a')} | Exp2: {exp2.get('summary', 'n/a')}",
+            "confidence": best_conf,
+            "triageColor": triage_color,
+            "priority": priority,
+            "aiDraftReport": f"{exp1.get('aiDraftReport', '')}\n\n{exp2.get('aiDraftReport', '')}".strip(),
+            "metadata": {"exp1": exp1.get("metadata", {}), "exp2": exp2.get("metadata", {})},
+        }
+    except Exception as ex:
+        exp2.setdefault("metadata", {})["exp1_error"] = str(ex)
+        return exp2
 
 
 def _enrich_analysis(
@@ -1140,6 +1148,7 @@ def _apply_analysis_to_case(db_case: Case, analysis: Dict[str, Any], db: Session
                 bbox_x2=bbox[2],
                 bbox_y2=bbox[3],
                 report=f.get("report"),
+                source_engine=f.get("engine"),
             )
         )
 
@@ -1165,15 +1174,40 @@ def _bootstrap_legacy_finding_if_possible(db_case: Case, db: Session) -> bool:
             bbox_x2=None,
             bbox_y2=None,
             report=db_case.ai_draft_report,
+            source_engine="legacy",
         )
     )
     db.commit()
     return True
 
 
+def _has_only_legacy_findings(findings: List[Finding]) -> bool:
+    if not findings:
+        return False
+    for row in findings:
+        src = (row.source_engine or "").strip().lower()
+        if src in {"experiment1", "experiment2"}:
+            return False
+    return True
+
+
 def _ensure_findings_for_case(patient_id: str, db: Session) -> List[Finding]:
     existing = db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
     if existing:
+        # Auto-heal legacy rows that predate per-engine tagging when the system now runs both pipelines.
+        if active_ai_model == "both" and _has_only_legacy_findings(existing):
+            db_case = db.query(Case).filter(Case.patient_id == patient_id, Case.is_deleted == 0).order_by(Case.id.desc()).first()
+            if db_case:
+                resolved_path = _resolve_image_path(db_case.image_path)
+                if resolved_path and os.path.exists(resolved_path):
+                    try:
+                        patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
+                        analysis = _run_active_pipeline(resolved_path, patient_context)
+                        _apply_analysis_to_case(db_case, analysis, db)
+                        return db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
+                    except Exception as ex:
+                        print(f"Dual pipeline legacy refresh failed for {patient_id}: {ex}")
+                        traceback.print_exc()
         return existing
 
     db_case = db.query(Case).filter(Case.patient_id == patient_id, Case.is_deleted == 0).order_by(Case.id.desc()).first()
@@ -1205,6 +1239,7 @@ def _ensure_findings_for_case(patient_id: str, db: Session) -> List[Finding]:
                         bbox_x2=None,
                         bbox_y2=None,
                         report=str(analysis.get("aiDraftReport") or previous_report or ""),
+                        source_engine="legacy",
                     )
                 )
                 db.commit()
@@ -1298,6 +1333,11 @@ class CaseFrontendSchema(BaseModel):
     aiDraftReport: Optional[str] = None
     isArchived: int = 0
 
+class ReportDownloadRequest(BaseModel):
+    patientId: str
+    includeImages: bool = True
+    specialistNotes: Optional[str] = None
+
 class CaseUpdateSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     ai_status: Optional[str] = Field(None, alias="aiStatus")
@@ -1372,6 +1412,7 @@ class FindingSchema(BaseModel):
     bbox_y2: Optional[int] = None
     report: Optional[str] = None
     severity: Optional[str] = None
+    source_engine: Optional[str] = None
 
 
 class LegacyReanalyzeRequest(BaseModel):
@@ -1389,6 +1430,24 @@ class LegacyReanalyzeResult(BaseModel):
     bootstrapped: int
     skipped_has_findings: int = Field(..., alias="skippedHasFindings")
     skipped_missing_image: int = Field(..., alias="skippedMissingImage")
+    failed: int
+    errors: List[str]
+
+
+class LegacyRefreshRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    include_archived: bool = Field(True, alias="includeArchived")
+    limit: Optional[int] = None
+    continue_on_error: bool = Field(True, alias="continueOnError")
+
+
+class LegacyRefreshResult(BaseModel):
+    total_candidates: int = Field(..., alias="totalCandidates")
+    processed: int
+    refreshed: int
+    skipped_missing_image: int = Field(..., alias="skippedMissingImage")
+    skipped_no_findings: int = Field(..., alias="skippedNoFindings")
+    skipped_already_tagged: int = Field(..., alias="skippedAlreadyTagged")
     failed: int
     errors: List[str]
 
@@ -2037,15 +2096,21 @@ def create_case(case: CaseCreateSchema, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_case)
 
-    # Auto-run analysis on case creation when image exists and AI is enabled.
+    # Auto-run full analysis (same path as /api/v1/analyze: enrich, policy, findings, ledger).
     resolved_path = _resolve_image_path(db_case.image_path)
     if resolved_path and os.path.exists(resolved_path) and active_ai_model != "none":
         case_patient_id = db_case.patient_id
         case_row_id = db_case.id
         try:
             patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
-            analysis = _run_active_pipeline(resolved_path, patient_context)
-            _apply_analysis_to_case(db_case, analysis, db)
+            _execute_analysis_request(
+                db,
+                image_path=resolved_path,
+                patient_context=patient_context,
+                patient_id=case_patient_id,
+                user_action="case_created",
+                force_consensus=False,
+            )
             db.refresh(db_case)
         except Exception as ex:
             print(f"Auto-analysis failed for {case_patient_id}: {ex}")
@@ -2372,6 +2437,68 @@ def reanalyze_legacy_cases(payload: LegacyReanalyzeRequest, db: Session = Depend
         errors=errors[:50],
     )
 
+
+@app.post("/api/v1/admin/refresh-legacy-findings", response_model=LegacyRefreshResult)
+def refresh_legacy_findings(payload: LegacyRefreshRequest, db: Session = Depends(get_db)):
+    query = db.query(Case).filter(Case.is_deleted == 0)
+    if not payload.include_archived:
+        query = query.filter(Case.is_archived == 0)
+
+    cases = query.order_by(Case.id.asc()).all()
+
+    skipped_no_findings = 0
+    skipped_already_tagged = 0
+    candidates: List[Case] = []
+
+    for case_obj in cases:
+        existing = db.query(Finding).filter(Finding.case_id == case_obj.patient_id, Finding.is_deleted == 0).all()
+        if not existing:
+            skipped_no_findings += 1
+            continue
+        if not _has_only_legacy_findings(existing):
+            skipped_already_tagged += 1
+            continue
+        candidates.append(case_obj)
+
+    if payload.limit is not None and payload.limit > 0:
+        candidates = candidates[: payload.limit]
+
+    processed = 0
+    refreshed = 0
+    skipped_missing_image = 0
+    failed = 0
+    errors: List[str] = []
+
+    for case_obj in candidates:
+        try:
+            resolved_path = _resolve_image_path(case_obj.image_path)
+            if not resolved_path or not os.path.exists(resolved_path):
+                skipped_missing_image += 1
+                processed += 1
+                continue
+
+            patient_context = f"{case_obj.age}{case_obj.sex}, complaint: {case_obj.complaint}"
+            analysis = _run_both_pipeline(resolved_path, patient_context)
+            _apply_analysis_to_case(case_obj, analysis, db)
+            refreshed += 1
+            processed += 1
+        except Exception as ex:
+            failed += 1
+            errors.append(f"{case_obj.patient_id}: {ex}")
+            if not payload.continue_on_error:
+                break
+
+    return LegacyRefreshResult(
+        totalCandidates=len(candidates),
+        processed=processed,
+        refreshed=refreshed,
+        skippedMissingImage=skipped_missing_image,
+        skippedNoFindings=skipped_no_findings,
+        skippedAlreadyTagged=skipped_already_tagged,
+        failed=failed,
+        errors=errors[:50],
+    )
+
 @app.post("/api/v1/findings/{patient_id}")
 def create_finding(patient_id: str, finding: FindingSchema, db: Session = Depends(get_db)):
     fnd = Finding(**finding.model_dump())
@@ -2457,6 +2584,47 @@ async def upload_image(file: UploadFile = File(...)):
         
     return {"imagePath": f".files/{unique_filename}"}
 
+
+@app.post("/api/v1/cases/{patient_id}/download")
+def download_report(patient_id: str, req: ReportDownloadRequest, db: Session = Depends(get_db)):
+    case_obj = db.query(Case).filter(Case.patient_id == patient_id, Case.is_deleted == 0).order_by(Case.id.desc()).first()
+    if not case_obj:
+        raise HTTPException(status_code=404, detail="Case not found")
+        
+    findings = db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
+    
+    # In a real app we'd use reportlab or similar. Here we return a structured JSON 
+    # that the frontend can format as a "mock" download or we could return a text report.
+    # For now, let's return the structured data which the frontend can use to generate a Blob.
+    
+    report_content = f"""
+RADFLOW CLINICAL REPORT
+-----------------------
+Patient ID: {case_obj.patient_id}
+Name: {case_obj.name}
+Age/Sex: {case_obj.age} / {case_obj.sex}
+Date: {_format_case_time_local(case_obj.time_received)}
+
+CLINICAL INDICATIONS:
+{case_obj.complaint}
+
+FINDINGS:
+"""
+    for f in findings:
+        report_content += f"- {f.disease}: {f.confidence:.2f} (Engine: {f.source_engine})\n"
+        if f.report:
+            report_content += f"  Note: {f.report[:200]}...\n"
+            
+    report_content += f"""
+IMPRESSION:
+{case_obj.ai_draft_report or "No significant abnormalities."}
+
+SPECIALIST REVIEW:
+{req.specialistNotes or "Pending final review."}
+
+DISCLAIMER: This is an AI-assisted draft report and must be verified by a qualified clinician.
+"""
+    return {"content": report_content, "filename": f"RadFlow_Report_{patient_id}.txt"}
 
 if __name__ == "__main__":
     import uvicorn

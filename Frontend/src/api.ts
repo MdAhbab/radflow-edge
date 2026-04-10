@@ -210,6 +210,23 @@ export interface LegacyReanalyzeResult {
   errors: string[];
 }
 
+export interface LegacyRefreshRequest {
+  includeArchived?: boolean;
+  limit?: number;
+  continueOnError?: boolean;
+}
+
+export interface LegacyRefreshResult {
+  totalCandidates: number;
+  processed: number;
+  refreshed: number;
+  skippedMissingImage: number;
+  skippedNoFindings: number;
+  skippedAlreadyTagged: number;
+  failed: number;
+  errors: string[];
+}
+
 export interface FindingData {
   case_id: string;
   disease: string;
@@ -220,6 +237,28 @@ export interface FindingData {
   bbox_y2?: number | null;
   report?: string | null;
   severity?: string | null;
+  source_engine?: string | null;
+}
+
+/** POST /api/v1/analyze — synchronous full pipeline (Exp1 + Exp2 when mode is `both`). */
+export interface AnalyzeXrayRequest {
+  imagePath: string;
+  patientId?: string;
+  patientContext?: string;
+  userAction?: string;
+  forceConsensus?: boolean;
+}
+
+export interface AnalyzeXrayResult {
+  engine?: string;
+  status?: string;
+  findings?: Array<Record<string, unknown>>;
+  summary?: string;
+  confidence?: number;
+  triageColor?: string;
+  priority?: string;
+  aiDraftReport?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ChatResponse {
@@ -286,6 +325,31 @@ export const api = {
   async getFindings(patientId: string): Promise<FindingData[]> {
     const res = await fetch(`${API_BASE}/findings/${patientId}`);
     if (!res.ok) throw new Error("Failed to fetch findings");
+    return res.json();
+  },
+
+  async analyzeXray(payload: AnalyzeXrayRequest): Promise<AnalyzeXrayResult> {
+    const res = await fetch(`${API_BASE}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imagePath: payload.imagePath,
+        patientId: payload.patientId,
+        patientContext: payload.patientContext ?? "",
+        userAction: payload.userAction ?? "manual_analyze",
+        forceConsensus: payload.forceConsensus ?? false,
+      }),
+    });
+    if (!res.ok) {
+      let detail = "Analysis failed";
+      try {
+        const err = await res.json();
+        if (err?.detail) detail = String(err.detail);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
     return res.json();
   },
 
@@ -389,10 +453,34 @@ export const api = {
     return res.json();
   },
 
+  async refreshLegacyFindings(payload: LegacyRefreshRequest = {}): Promise<LegacyRefreshResult> {
+    const res = await fetch(`${API_BASE}/admin/refresh-legacy-findings`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        includeArchived: payload.includeArchived ?? true,
+        limit: payload.limit,
+        continueOnError: payload.continueOnError ?? true,
+      }),
+    });
+    if (!res.ok) throw new Error("Failed to refresh legacy findings");
+    return res.json();
+  },
+
   async getAiModel(): Promise<string> {
     const res = await fetch(`${API_BASE}/system/model`);
     const data = await res.json();
     return data.modelId;
+  },
+
+  async downloadReport(patientId: string, specialistNotes?: string): Promise<{content: string, filename: string}> {
+    const res = await fetch(`${API_BASE}/cases/${patientId}/download`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ patientId, specialistNotes, includeImages: true })
+    });
+    if (!res.ok) throw new Error("Failed to generate report");
+    return res.json();
   },
 
   async setAiModel(modelId: string): Promise<void> {

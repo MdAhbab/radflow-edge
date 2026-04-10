@@ -34,6 +34,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
+import { useHeader } from "../AppLayout";
 import { api, CaseData, CaseStats } from "../../../api";
 
 /* ─────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ function EmptyState({ filtered, onClearFilter }: { filtered: boolean; onClearFil
    MAIN COMPONENT
 ───────────────────────────────────────────────────────── */
 export function Worklist() {
+  const { setSlots, clearSlots } = useHeader();
   const navigate = useNavigate();
   const [cases, setCases] = useState<CaseData[]>([]);
   const [stats, setStats] = useState<CaseStats | null>(null);
@@ -140,6 +142,42 @@ export function Worklist() {
   const pendingCount   = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing").length;
   const escalatedCount = cases.filter(c => c.aiStatus === "escalated").length;
   const urgentCount    = cases.filter(c => c.triageColor === "red").length;
+
+  useEffect(() => {
+    setSlots({
+      left: (
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 bg-blue-50 rounded-lg shrink-0">
+            <ClipboardList className="h-5 w-5 text-blue-600" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-slate-900 tracking-tight leading-none">Clinical Worklist</h1>
+            <p className="text-xs text-slate-500 mt-1 font-medium italic">Radiology Workflow Console</p>
+          </div>
+        </div>
+      ),
+      right: (
+        <div className="flex items-center gap-2">
+          <Link to="/dashboard/new-report">
+            <Button size="sm" className="h-9 bg-blue-600 hover:bg-blue-700 text-white shadow-sm px-4">
+              <FilePlus className="h-4 w-4 mr-2" />
+              New Case Submission
+            </Button>
+          </Link>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            className="h-9 w-9 p-0 border-slate-200 text-slate-500 hover:text-slate-900 shadow-sm" 
+            onClick={() => { setLoading(true); fetchData(); }}
+            disabled={loading}
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+      )
+    });
+    return () => clearSlots();
+  }, [setSlots, clearSlots, loading]);
 
   const fetchData = async () => {
     setError(null);
@@ -215,23 +253,8 @@ export function Worklist() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
-      {/* ── PAGE HEADER ─────────────────────────────────────── */}
-      <div className="bg-white border-b border-slate-200 px-6 pt-5 pb-4 space-y-4 shrink-0">
-        <div className="flex items-start justify-between">
-          <div>
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight">Patient Queue</h2>
-            <p className="text-sm text-slate-500 mt-0.5">
-              Today's radiology submissions · auto-refreshes every 10s
-            </p>
-          </div>
-          <Link to="/dashboard/new-report">
-            <Button className="bg-blue-600 hover:bg-blue-500 text-white rounded-xl gap-1.5 text-sm shadow-sm shadow-blue-600/20">
-              <FilePlus className="h-4 w-4" />
-              New Submission
-            </Button>
-          </Link>
-        </div>
-
+      {/* ── SUB-HEADER / STATS ── */}
+      <div className="bg-white border-b border-slate-200 px-6 py-4 space-y-4 shrink-0">
         {/* ── STAT CARDS ──────────────────────────────────── */}
         <div className="grid grid-cols-4 gap-3">
           <StatCard

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { 
   ArrowLeft,
@@ -50,8 +50,7 @@ export function CaseReview() {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(true);
-  const [genexpertOrdered, setGenexpertOrdered] = useState(false);
-  const pendingPatchRef = useRef<Partial<CaseData>>({});
+    const pendingPatchRef = useRef<Partial<CaseData>>({});
   const saveTimerRef = useRef<number | null>(null);
   const [autosaveState, setAutosaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [imageLayout, setImageLayout] = useState({
@@ -220,6 +219,10 @@ export function CaseReview() {
       f.bbox_x2 != null &&
       f.bbox_y2 != null
   );
+  const exp1Annotations = annotationFindings.filter(f => f.source_engine !== "experiment2");
+  const exp2Annotations = annotationFindings.filter(f => f.source_engine === "experiment2");
+  const isDualView = findings.some(f => f.source_engine === "experiment2") || latestLedger != null;
+
 
   const handleIsolate = async () => {
     if (!caseData) return;
@@ -407,15 +410,6 @@ export function CaseReview() {
             Isolate
           </Button>
           <Button
-            variant={genexpertOrdered ? "secondary" : "outline"}
-            size="sm"
-            className={`h-8 text-xs px-3 ${genexpertOrdered ? "bg-green-50 text-green-700 hover:bg-green-100 border-green-200" : ""}`}
-            onClick={() => setGenexpertOrdered(true)}
-          >
-            <Activity className="h-3.5 w-3.5 mr-1.5" />
-            {genexpertOrdered ? "GeneXpert Ordered" : "Order GeneXpert"}
-          </Button>
-          <Button
             variant="outline"
             size="sm"
             className="h-8 text-xs px-3"
@@ -456,7 +450,7 @@ export function CaseReview() {
 
     return () => clearSlots();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caseData, genexpertOrdered, actionLoading]);
+  }, [caseData, actionLoading]);
 
   if (loading) {
     return (
@@ -673,66 +667,118 @@ export function CaseReview() {
           </div>
 
           {/* X-Ray Image */}
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div className="relative" style={{ transform: `scale(${zoom / 100})` }}>
-              {/* Placeholder X-ray with annotations */}
-              <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden">
+          <div className="flex-1 flex items-center justify-center p-8 overflow-auto">
+            <div className="relative flex flex-col xl:flex-row gap-8" style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}>
+              
+              {/* Image 1 - Exp 1 */}
+              <div className="flex flex-col items-center gap-2">
+                {isDualView && <h3 className="text-slate-300 font-medium text-sm">Experiment 1 (Detector & Analyzer)</h3>}
+                <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl">
                   {/* Simulated X-ray gradient */}
-                <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
-                
-                {caseData?.imagePath ? (
-                  <img 
-                    src={getImageUrl(caseData.imagePath)} 
-                    className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
-                    alt="Patient Radiograph" 
-                    onLoad={handleImageLoad}
-                  />
-                ) : (
-                  <svg viewBox="0 0 500 600" className="absolute inset-0 w-full h-full opacity-40">
-                    {/* Right lung */}
-                    <ellipse cx="180" cy="300" rx="120" ry="200" fill="#666" />
-                    {/* Left lung */}
-                    <ellipse cx="320" cy="300" rx="120" ry="200" fill="#666" />
-                    {/* Trachea */}
-                    <rect x="240" y="50" width="20" height="150" fill="#555" />
-                  </svg>
-                )}
+                  <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
+                  
+                  {caseData?.imagePath ? (
+                    <img 
+                      src={getImageUrl(caseData.imagePath)} 
+                      className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
+                      alt="Patient Radiograph" 
+                      onLoad={handleImageLoad}
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
+                  )}
 
-                {showAnnotations && (
-                  <>
-                    {annotationFindings.map((finding, idx) => {
-                      const x1 = finding.bbox_x1 as number;
-                      const y1 = finding.bbox_y1 as number;
-                      const x2 = finding.bbox_x2 as number;
-                      const y2 = finding.bbox_y2 as number;
-                      const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
-                      const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
-                      const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
-                      const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
-                      const isPrimary = idx === 0;
-                      const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
-                      const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
-                      return (
-                        <div
-                          key={`ann-${idx}-${finding.disease}`}
-                          className={`absolute border-2 ${boxClass} rounded-md shadow-lg`}
-                          style={{ left, top, width, height }}
-                        >
-                          <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
-                            {finding.disease.replace(/_/g, " ")}
+                  {showAnnotations && (
+                    <>
+                      {(isDualView ? exp1Annotations : annotationFindings).map((finding, idx) => {
+                        const x1 = finding.bbox_x1 as number;
+                        const y1 = finding.bbox_y1 as number;
+                        const x2 = finding.bbox_x2 as number;
+                        const y2 = finding.bbox_y2 as number;
+                        const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
+                        const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
+                        const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
+                        const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+                        const isPrimary = idx === 0;
+                        const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
+                        const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+                        return (
+                          <div
+                            key={`ann1-${idx}-${finding.disease}`}
+                            className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
+                            style={{ left, top, width, height }}
+                          >
+                            <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
+                              {finding.disease.replace(/_/g, " ")}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
+                        );
+                      })}
+                    </>
+                  )}
 
-                {/* Image metadata overlay */}
-                <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
-                  <div>{caseData.patientId} | {caseData.studyType}</div>
-                  <div>{caseData.timeReceived}</div>
+                  {/* Image metadata overlay */}
+                  <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
+                    <div>{caseData?.patientId} | {caseData?.studyType}</div>
+                    <div>{caseData?.timeReceived}</div>
+                  </div>
                 </div>
               </div>
+
+              {/* Image 2 - Exp 2 (Only if Dual View) */}
+              {isDualView && (
+                <div className="flex flex-col items-center gap-2">
+                  <h3 className="text-slate-300 font-medium text-sm">Experiment 2 (Foveal & Reasoner)</h3>
+                  <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl">
+                    <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
+                    
+                    {caseData?.imagePath ? (
+                      <img 
+                        src={getImageUrl(caseData.imagePath)} 
+                        className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
+                        alt="Patient Radiograph" 
+                      />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
+                    )}
+
+                    {showAnnotations && (
+                      <>
+                        {exp2Annotations.map((finding, idx) => {
+                          const x1 = finding.bbox_x1 as number;
+                          const y1 = finding.bbox_y1 as number;
+                          const x2 = finding.bbox_x2 as number;
+                          const y2 = finding.bbox_y2 as number;
+                          const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
+                          const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
+                          const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
+                          const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+                          const isPrimary = idx === 0;
+                          const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
+                          const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+                          return (
+                            <div
+                              key={`ann2-${idx}-${finding.disease}`}
+                              className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
+                              style={{ left, top, width, height }}
+                            >
+                              <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
+                                {finding.disease.replace(/_/g, " ")}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+
+                    <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
+                      <div>{caseData?.patientId} | {caseData?.studyType}</div>
+                      <div>{caseData?.timeReceived}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </div>
           </div>
         </div>
@@ -751,9 +797,6 @@ export function CaseReview() {
                       {topFinding?.disease?.replace(/_/g, " ") || "Critical finding"}
                     </Badge>
                   </div>
-                  <p className="text-sm text-slate-700 leading-relaxed">
-                    {topFinding?.report || caseData.aiDraftReport || "AI analysis complete. Review findings and proceed with clinical decision."}
-                  </p>
                 </div>
               ) : hasAiOutput ? (
                 <div className="rounded-lg border border-amber-200 border-l-[3px] border-l-amber-400 bg-amber-50/30 px-4 py-3">

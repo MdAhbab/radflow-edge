@@ -32,6 +32,7 @@ export function SystemStatus() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [refreshingLegacy, setRefreshingLegacy] = useState(false);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
   const [jobs, setJobs] = useState<AnalyzeJobStatus[]>([]);
   const [observability, setObservability] = useState<ObservabilitySnapshot | null>(null);
@@ -172,6 +173,35 @@ export function SystemStatus() {
             >
               {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
               {reanalyzing ? "Reanalyzing..." : "Admin: Reanalyze Legacy"}
+            </button>
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-sm font-medium disabled:opacity-50"
+              disabled={refreshingLegacy}
+              onClick={async () => {
+                setRefreshingLegacy(true);
+                toast.info("Refreshing legacy findings with dual-pipeline pass...");
+                try {
+                  const result = await api.refreshLegacyFindings({
+                    includeArchived: true,
+                    continueOnError: true,
+                  });
+                  const message = `Refreshed ${result.refreshed}/${result.totalCandidates}; processed ${result.processed}, missing image ${result.skippedMissingImage}, failed ${result.failed}.`;
+                  if (result.failed > 0) {
+                    toast.warning(message);
+                  } else {
+                    toast.success(message);
+                  }
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : "Failed to refresh legacy findings";
+                  toast.error(message);
+                } finally {
+                  setRefreshingLegacy(false);
+                }
+              }}
+            >
+              {refreshingLegacy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+              {refreshingLegacy ? "Refreshing Legacy..." : "Admin: Refresh Legacy Findings"}
             </button>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 text-sm font-medium h-fit">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
