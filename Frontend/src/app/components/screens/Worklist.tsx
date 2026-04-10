@@ -9,8 +9,11 @@ import {
   CheckCircle2,
   Clock,
   ChevronRight,
+  ChevronLeft,
   FilePlus,
   RefreshCw,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -75,22 +78,6 @@ function StatCard({ label, value, icon, borderCls, valueCls, bgCls }: StatCardPr
   );
 }
 
-/* ─────────────────────────────────────────────────────────
-   AI CERTAINTY DISPLAY
-───────────────────────────────────────────────────────── */
-function AICertainty({ confidence }: { confidence: number }) {
-  if (confidence === 0) return <span className="text-slate-300">—</span>;
-  const scale = confidence <= 1 ? 100 : 1;
-  const value = Math.round(confidence * scale);
-  const dotCls = value >= 85 ? "bg-emerald-500" : value >= 70 ? "bg-amber-400" : "bg-red-500";
-  const textCls = value >= 85 ? "text-emerald-700" : value >= 70 ? "text-amber-700" : "text-red-700";
-  return (
-    <span className={`flex items-center gap-1.5 font-semibold text-sm ${textCls}`}>
-      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} />
-      {value}%
-    </span>
-  );
-}
 
 /* ─────────────────────────────────────────────────────────
    EMPTY STATE
@@ -99,7 +86,7 @@ function EmptyState({ filtered, onClearFilter }: { filtered: boolean; onClearFil
   if (filtered) {
     return (
       <TableRow>
-        <TableCell colSpan={8} className="py-16 text-center">
+        <TableCell colSpan={7} className="py-16 text-center">
           <p className="text-sm text-slate-500 mb-2">No cases match this filter.</p>
           <button
             onClick={onClearFilter}
@@ -113,7 +100,7 @@ function EmptyState({ filtered, onClearFilter }: { filtered: boolean; onClearFil
   }
   return (
     <TableRow>
-      <TableCell colSpan={8} className="py-20 text-center">
+      <TableCell colSpan={7} className="py-20 text-center">
         <div className="flex flex-col items-center gap-3">
           <div className="p-3 bg-slate-100 rounded-full">
             <ClipboardList className="h-6 w-6 text-slate-400" />
@@ -145,13 +132,9 @@ export function Worklist() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [quickFilters, setQuickFilters] = useState({
-    lowConfidence: false,
-    highUncertainty: false,
-    disagreement: false,
-    noFindings: false,
-  });
-  const [sortBy, setSortBy] = useState("time");
+  const [sortBy, setSortBy] = useState("newest");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(8);
 
   /* ── derived counts for tabs and stats ── */
   const pendingCount   = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing").length;
@@ -199,26 +182,29 @@ export function Worklist() {
         c.complaint.toLowerCase().includes(q)
       );
     })
-    .filter((c) => {
-      const conf = c.confidence <= 1 ? c.confidence * 100 : c.confidence;
-      if (quickFilters.lowConfidence && conf >= 35) return false;
-      if (quickFilters.highUncertainty && conf > 60) return false;
-      if (
-        quickFilters.disagreement &&
-        !(c.aiDraftReport || "").toLowerCase().includes("consensus_disagreement")
-      )
-        return false;
-      if (quickFilters.noFindings && conf > 0) return false;
-      return true;
-    });
+;
 
   /* ── sort ── */
+  // cases[] from the API is in DB insertion order: index 0 = oldest, last = newest
+  const idxMap = new Map(cases.map((c, i) => [c.patientId, i]));
+
   const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "newest")     return (idxMap.get(b.patientId) ?? 0) - (idxMap.get(a.patientId) ?? 0);
+    if (sortBy === "oldest")     return (idxMap.get(a.patientId) ?? 0) - (idxMap.get(b.patientId) ?? 0);
     if (sortBy === "priority")   return triageOrder[a.triageColor] - triageOrder[b.triageColor];
-    if (sortBy === "confidence") return b.confidence - a.confidence;
     if (sortBy === "name")       return a.name.localeCompare(b.name);
-    return 0; // "time" — keep API order
+    return 0;
   });
+
+  /* ── pagination ── */
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const safePage   = Math.min(currentPage, totalPages);
+  const paginated  = sorted.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  const goTo = (p: number) => setCurrentPage(Math.max(1, Math.min(p, totalPages)));
+
+  /* reset to page 1 on filter/search/tab changes */
+  const resetPage = () => setCurrentPage(1);
 
   const handleRowClick = (patientId: string) => {
     localStorage.setItem("hsil_last_viewed_case", patientId);
@@ -226,8 +212,6 @@ export function Worklist() {
   };
 
   const isFiltered = activeTab !== "all" || searchQuery.length > 0;
-  const anyQuickFilter = Object.values(quickFilters).some(Boolean);
-  const isFilteredAny = isFiltered || anyQuickFilter;
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
@@ -285,7 +269,7 @@ export function Worklist() {
         </div>
 
         {/* ── TABS ────────────────────────────────────────── */}
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); resetPage(); }}>
           <TabsList className="bg-slate-100 p-0.5 gap-0.5 h-auto rounded-xl">
             <TabsTrigger value="all" className="rounded-lg text-xs px-4 py-2 data-[state=active]:bg-white data-[state=active]:shadow-sm">
               All Cases
@@ -316,44 +300,22 @@ export function Worklist() {
               placeholder="Search by patient name, ID, or complaint…"
               className="pl-9 h-9 text-sm bg-slate-50 border-slate-200 focus-visible:ring-blue-500/40 rounded-xl"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSearchQuery(e.target.value); resetPage(); }}
             />
           </div>
-          <Select value={sortBy} onValueChange={setSortBy}>
+          <Select value={sortBy} onValueChange={(v) => { setSortBy(v); resetPage(); }}>
             <SelectTrigger className="w-44 h-9 text-sm rounded-xl bg-slate-50 border-slate-200">
               <SelectValue placeholder="Sort by" />
             </SelectTrigger>
             <SelectContent className="rounded-xl">
-              <SelectItem value="time">Time Received</SelectItem>
+              <SelectItem value="newest">Newest First</SelectItem>
+              <SelectItem value="oldest">Oldest First</SelectItem>
               <SelectItem value="priority">Priority Level</SelectItem>
-              <SelectItem value="confidence">AI Certainty</SelectItem>
               <SelectItem value="name">Patient Name</SelectItem>
             </SelectContent>
           </Select>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          {[
-            { key: "lowConfidence", label: "Low Confidence" },
-            { key: "highUncertainty", label: "High Uncertainty" },
-            { key: "disagreement", label: "Disagreement" },
-            { key: "noFindings", label: "No Findings" },
-          ].map((chip) => (
-            <Button
-              key={chip.key}
-              size="sm"
-              variant={quickFilters[chip.key as keyof typeof quickFilters] ? "default" : "outline"}
-              onClick={() =>
-                setQuickFilters((prev) => ({
-                  ...prev,
-                  [chip.key]: !prev[chip.key as keyof typeof quickFilters],
-                }))
-              }
-            >
-              {chip.label}
-            </Button>
-          ))}
-        </div>
       </div>
 
       {/* ── CASES TABLE ──────────────────────────────────────── */}
@@ -375,44 +337,37 @@ export function Worklist() {
             </Button>
           </div>
         ) : (
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col">
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50 border-b border-slate-200">
                   <TableHead className="w-[140px] pl-5 text-xs font-semibold text-slate-500 uppercase tracking-wide">Patient</TableHead>
                   <TableHead className="w-[72px] text-xs font-semibold text-slate-500 uppercase tracking-wide">Age / Sex</TableHead>
                   <TableHead className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Chief Complaint</TableHead>
-                  <TableHead className="w-[110px] text-xs font-semibold text-slate-500 uppercase tracking-wide">Received</TableHead>
+                  <TableHead className="w-[160px] text-xs font-semibold text-slate-500 uppercase tracking-wide">Received</TableHead>
                   <TableHead className="w-[155px] text-xs font-semibold text-slate-500 uppercase tracking-wide">AI Status</TableHead>
                   <TableHead className="w-[100px] text-xs font-semibold text-slate-500 uppercase tracking-wide">Triage</TableHead>
-                  <TableHead className="w-[110px] text-xs font-semibold text-slate-500 uppercase tracking-wide">AI Certainty</TableHead>
                   <TableHead className="w-[110px] text-right pr-4 text-xs font-semibold text-slate-500 uppercase tracking-wide">Action</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="py-16 text-center">
+                    <TableCell colSpan={7} className="py-16 text-center">
                       <Loader2 className="h-5 w-5 animate-spin text-slate-400 mx-auto mb-2" />
                       <p className="text-sm text-slate-400">Fetching patient queue…</p>
                     </TableCell>
                   </TableRow>
                 ) : sorted.length === 0 ? (
                   <EmptyState
-                    filtered={isFilteredAny}
+                    filtered={isFiltered}
                     onClearFilter={() => {
                       setActiveTab("all");
                       setSearchQuery("");
-                      setQuickFilters({
-                        lowConfidence: false,
-                        highUncertainty: false,
-                        disagreement: false,
-                        noFindings: false,
-                      });
                     }}
                   />
                 ) : (
-                  sorted.map((c) => {
+                  paginated.map((c) => {
                     const triage = triageConfig[c.triageColor] ?? triageConfig.green;
                     const aiSt   = aiStatusConfig[c.aiStatus]  ?? { label: c.aiStatus, cls: "bg-slate-100 text-slate-600 border-slate-200" };
                     const isReady    = c.aiStatus === "ready";
@@ -438,8 +393,8 @@ export function Worklist() {
                         </TableCell>
 
                         {/* Chief Complaint */}
-                        <TableCell className="max-w-xs">
-                          <p className="text-sm text-slate-700 truncate">{c.complaint}</p>
+                        <TableCell>
+                          <p className="text-sm text-slate-700 line-clamp-2 whitespace-normal leading-snug">{c.complaint}</p>
                         </TableCell>
 
                         {/* Received */}
@@ -470,11 +425,6 @@ export function Worklist() {
                           </Badge>
                         </TableCell>
 
-                        {/* AI Certainty */}
-                        <TableCell>
-                          <AICertainty confidence={c.confidence} />
-                        </TableCell>
-
                         {/* Open Case */}
                         <TableCell className="text-right pr-4">
                           <button
@@ -499,6 +449,99 @@ export function Worklist() {
                 )}
               </TableBody>
             </Table>
+
+            {/* ── PAGINATION FOOTER ───────────────────────────── */}
+            {!loading && sorted.length > 0 && (
+              <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/60">
+
+                {/* Left: count + page size */}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500">
+                    Showing{" "}
+                    <span className="font-semibold text-slate-700">
+                      {(safePage - 1) * pageSize + 1}–{Math.min(safePage * pageSize, sorted.length)}
+                    </span>
+                    {" "}of{" "}
+                    <span className="font-semibold text-slate-700">{sorted.length}</span>
+                    {" "}cases
+                  </span>
+                  <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
+                    <SelectTrigger className="h-7 w-24 text-xs rounded-lg bg-white border-slate-200">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="rounded-lg">
+                      {[8, 15, 25, 50].map(n => (
+                        <SelectItem key={n} value={String(n)} className="text-xs">{n} / page</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Right: page buttons */}
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => goTo(1)}
+                    disabled={safePage === 1}
+                    className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700
+                               disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-150"
+                  >
+                    <ChevronsLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => goTo(safePage - 1)}
+                    disabled={safePage === 1}
+                    className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700
+                               disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-150"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+
+                  {/* Page number pills */}
+                  {Array.from({ length: totalPages }, (_, i) => i + 1)
+                    .filter(p => p === 1 || p === totalPages || Math.abs(p - safePage) <= 1)
+                    .reduce<(number | "…")[]>((acc, p, idx, arr) => {
+                      if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push("…");
+                      acc.push(p);
+                      return acc;
+                    }, [])
+                    .map((p, i) =>
+                      p === "…" ? (
+                        <span key={`ellipsis-${i}`} className="px-1 text-xs text-slate-400">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          onClick={() => goTo(p as number)}
+                          className={`min-w-[28px] h-7 px-2 rounded-lg text-xs font-medium transition-colors duration-150
+                            ${safePage === p
+                              ? "bg-blue-600 text-white shadow-sm"
+                              : "text-slate-600 hover:bg-slate-200"
+                            }`}
+                        >
+                          {p}
+                        </button>
+                      )
+                    )
+                  }
+
+                  <button
+                    onClick={() => goTo(safePage + 1)}
+                    disabled={safePage === totalPages}
+                    className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700
+                               disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-150"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => goTo(totalPages)}
+                    disabled={safePage === totalPages}
+                    className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-200 hover:text-slate-700
+                               disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-150"
+                  >
+                    <ChevronsRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

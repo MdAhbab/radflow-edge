@@ -34,8 +34,8 @@ safetensors
 pydicom
 pillow
 opencv-python
-numpy<2.0
-pytorch-grad-cam
+numpy>=2.0
+grad-cam
 
 # RAG & Vector Database
 chromadb

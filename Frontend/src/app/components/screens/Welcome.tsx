@@ -36,21 +36,16 @@ import { api, SystemStatus } from "../../../api";
  
 
 /* ─────────────────────────────────────────────────────────
-   SCROLL REVEAL HOOK  – IntersectionObserver, no spring
+   SCROLL REVEAL – smooth cubic-bezier ease-out
 ───────────────────────────────────────────────────────── */
-function useReveal(threshold = 0.12) {
+function useReveal(threshold = 0.1) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const obs = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisible(true);
-          obs.disconnect();
-        }
-      },
+      ([entry]) => { if (entry.isIntersecting) { setVisible(true); obs.disconnect(); } },
       { threshold }
     );
     obs.observe(el);
@@ -59,27 +54,33 @@ function useReveal(threshold = 0.12) {
   return { ref, visible };
 }
 
-/* Wrapper that fades + lifts in when scrolled into view */
-function Reveal({
-  children,
-  delay = 0,
-  className = "",
-}: {
-  children: React.ReactNode;
-  delay?: number;
-  className?: string;
+function Reveal({ children, delay = 0, className = "" }: {
+  children: React.ReactNode; delay?: number; className?: string;
 }) {
   const { ref, visible } = useReveal();
   return (
-    <div
-      ref={ref}
-      className={className}
-      style={{
-        opacity: visible ? 1 : 0,
-        transform: visible ? "translateY(0)" : "translateY(18px)",
-        transition: `opacity 0.55s ease ${delay}ms, transform 0.55s ease ${delay}ms`,
-      }}
-    >
+    <div ref={ref} className={className} style={{
+      opacity: visible ? 1 : 0,
+      transform: visible ? "translateY(0)" : "translateY(14px)",
+      transition: `opacity 0.65s cubic-bezier(0.16,1,0.3,1) ${delay}ms, transform 0.65s cubic-bezier(0.16,1,0.3,1) ${delay}ms`,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+/* Fade-in on mount with custom delay */
+function FadeIn({ children, delay = 0, className = "" }: {
+  children: React.ReactNode; delay?: number; className?: string;
+}) {
+  const [show, setShow] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setShow(true), delay + 80); return () => clearTimeout(t); }, [delay]);
+  return (
+    <div className={className} style={{
+      opacity: show ? 1 : 0,
+      transform: show ? "translateY(0)" : "translateY(16px)",
+      transition: "opacity 0.7s cubic-bezier(0.16,1,0.3,1), transform 0.7s cubic-bezier(0.16,1,0.3,1)",
+    }}>
       {children}
     </div>
   );
@@ -112,75 +113,37 @@ function StatCounter({
 }
 
 /* ─────────────────────────────────────────────────────────
-   FEATURE CARD
+   CAPABILITY ROW  – minimal, single accent
 ───────────────────────────────────────────────────────── */
 interface FeatureCardProps {
-  index: string;
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  metric: string;
-  metricLabel: string;
-  accent: string;
-  accentText: string;
-  accentBg: string;
-}
-function FeatureCard({ index, icon, title, description, metric, metricLabel, accent, accentText, accentBg }: FeatureCardProps) {
-  return (
-    <div
-      className="group relative bg-slate-900/60 border border-slate-700/40 rounded-2xl p-7 backdrop-blur-sm
-                 hover:border-slate-600/60 hover:-translate-y-1 transition-all duration-300
-                 hover:shadow-2xl hover:bg-slate-800/60"
-    >
-      <span className="absolute top-6 right-7 text-[10px] font-mono tracking-widest text-slate-600 uppercase">{index}</span>
-      <div className={`inline-flex p-3 rounded-xl mb-5 ${accentBg}`}>
-        <div className={`h-5 w-5 ${accentText}`}>{icon}</div>
-      </div>
-      <h3 className="text-base font-semibold text-white mb-2 leading-snug">{title}</h3>
-      <p className="text-sm text-slate-400 leading-relaxed mb-6">{description}</p>
-      <div className="flex items-center gap-2">
-        <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${accentBg} ${accentText}`}>{metric}</span>
-        <span className="text-xs text-slate-500">{metricLabel}</span>
-      </div>
-      <div className={`absolute bottom-0 left-6 right-6 h-px ${accent} opacity-0 group-hover:opacity-100 transition-opacity duration-300 rounded-full`} />
-    </div>
-  );
+  index: string; icon: React.ReactNode; title: string;
+  description: string; metric: string; metricLabel: string;
+  accent: string; accentText: string; accentBg: string;
 }
 
 /* ─────────────────────────────────────────────────────────
-   PIPELINE STEP
+   PIPELINE STEP  – numbered horizontal node
 ───────────────────────────────────────────────────────── */
 interface PipelineStepProps {
-  number: number;
-  icon: React.ReactNode;
-  title: string;
-  body: string;
-  isLast?: boolean;
-  accentBg: string;
-  accentText: string;
+  number: number; icon: React.ReactNode; title: string;
+  body: string; isLast?: boolean; accentBg: string; accentText: string;
 }
-function PipelineStep({ number, icon, title, body, isLast, accentBg, accentText }: PipelineStepProps) {
+function PipelineStep({ number, icon, title, body, isLast }: PipelineStepProps) {
   return (
-    <div className="flex flex-col items-center text-center relative flex-1 min-w-0">
-      {/* Connector line */}
+    <div className="flex flex-col items-center text-center relative flex-1 min-w-0 group">
       {!isLast && (
-        <div className="absolute top-[28px] left-[calc(50%+28px)] right-0 h-px bg-gradient-to-r from-slate-600/60 to-slate-700/30 z-0" />
+        <div className="absolute top-5 left-[calc(50%+20px)] right-0 h-px bg-slate-800/80 z-0" />
       )}
-
-      {/* Icon box with number badge */}
-      <div className="relative z-10 mb-4">
-        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${accentBg} border border-slate-700/40`}>
-          <div className={`h-6 w-6 ${accentText}`}>{icon}</div>
+      <div className="relative z-10 mb-3">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-slate-900 border border-slate-800
+                        group-hover:border-blue-500/40 group-hover:bg-slate-800/80 transition-all duration-300">
+          <div className="h-4 w-4 text-slate-400 group-hover:text-blue-400 transition-colors duration-300">{icon}</div>
         </div>
-        <span className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-slate-800 border border-slate-700
-                         flex items-center justify-center text-[10px] font-bold text-slate-300">
-          {number}
-        </span>
+        <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-slate-950 border border-slate-800
+                         flex items-center justify-center text-[9px] font-bold text-slate-500">{number}</span>
       </div>
-
-      {/* Text */}
-      <p className="text-sm font-semibold text-white mb-1.5 leading-snug">{title}</p>
-      <p className="text-xs text-slate-500 leading-relaxed px-2">{body}</p>
+      <p className="text-xs font-semibold text-slate-300 mb-1 leading-snug group-hover:text-white transition-colors duration-200">{title}</p>
+      <p className="text-[10px] text-slate-600 leading-relaxed px-1 group-hover:text-slate-500 transition-colors duration-200">{body}</p>
     </div>
   );
 }
@@ -264,32 +227,32 @@ export function Welcome() {
 
   const features: FeatureCardProps[] = [
     {
-      index: "01", icon: <BrainCircuit className="h-5 w-5" />,
+      index: "01", icon: <BrainCircuit className="h-4 w-4" />,
       title: "Offline-First Edge AI",
-      description: "Run DICOM-grade radiology models entirely on local hardware. No internet dependency for anomaly detection — designed for zero-connectivity environments.",
-      metric: "< 2s", metricLabel: "average inference time",
+      description: "DICOM-grade models run entirely on local hardware — no internet required.",
+      metric: "< 2s", metricLabel: "avg inference",
       accent: "bg-blue-500", accentText: "text-blue-400", accentBg: "bg-blue-500/10",
     },
     {
-      index: "02", icon: <ScanLine className="h-5 w-5" />,
+      index: "02", icon: <ScanLine className="h-4 w-4" />,
       title: "TB & Pathology Detection",
-      description: "Trained on Bangladeshi patient cohorts. Detects tuberculosis, pleural effusion, cardiomegaly and 12 other conditions with specialist-level sensitivity.",
-      metric: "99.1%", metricLabel: "TB detection sensitivity",
-      accent: "bg-emerald-500", accentText: "text-emerald-400", accentBg: "bg-emerald-500/10",
+      description: "Detects TB, pleural effusion, cardiomegaly and 12 other conditions.",
+      metric: "99.1%", metricLabel: "TB sensitivity",
+      accent: "bg-blue-500", accentText: "text-blue-400", accentBg: "bg-blue-500/10",
     },
     {
-      index: "03", icon: <Layers className="h-5 w-5" />,
+      index: "03", icon: <Layers className="h-4 w-4" />,
       title: "Smart Triage Queue",
-      description: "AI automatically ranks incoming cases by severity. Critical findings surface first — giving clinicians a prioritized, actionable worklist every shift.",
-      metric: "Auto", metricLabel: "priority escalation",
-      accent: "bg-violet-500", accentText: "text-violet-400", accentBg: "bg-violet-500/10",
+      description: "AI prioritises cases by severity so critical findings surface first.",
+      metric: "Auto", metricLabel: "escalation",
+      accent: "bg-blue-500", accentText: "text-blue-400", accentBg: "bg-blue-500/10",
     },
     {
-      index: "04", icon: <Wifi className="h-5 w-5" />,
+      index: "04", icon: <Wifi className="h-4 w-4" />,
       title: "Sync on Reconnect",
-      description: "When internet resumes, flagged cases are securely pushed to remote specialists. Full clinical context, AI findings, and images in one structured handoff.",
-      metric: "E2E", metricLabel: "encrypted sync",
-      accent: "bg-teal-500", accentText: "text-teal-400", accentBg: "bg-teal-500/10",
+      description: "Flagged cases sync securely to remote specialists when connectivity returns.",
+      metric: "E2E", metricLabel: "encrypted",
+      accent: "bg-blue-500", accentText: "text-blue-400", accentBg: "bg-blue-500/10",
     },
   ];
 
@@ -335,44 +298,37 @@ export function Welcome() {
       {/* ── LEFT PANEL ──────────────────────────────────────────── */}
       <div
         id="landing-scroll-area"
-        className="flex-1 h-full overflow-y-auto overflow-x-hidden relative scroll-smooth"
+        className="w-[60%] h-full overflow-y-auto overflow-x-hidden relative scroll-smooth"
+        style={{ scrollbarWidth: "none" }}
       >
         {/* ── HEADER ────────────────────────────────────────────── */}
-        <header
-          className={`fixed top-0 left-0 w-[calc(100%-380px)] z-50 transition-all duration-500
-            ${scrolled
-              ? "bg-slate-950/92 backdrop-blur-xl border-b border-slate-800/60 py-3.5"
-              : "bg-transparent py-5"
-            }`}
+        <header className={`fixed top-0 left-0 w-[60%] z-50 transition-all duration-500
+          ${scrolled ? "bg-slate-950/90 backdrop-blur-xl border-b border-slate-800/40 py-3" : "bg-transparent py-4"}`}
         >
-          <div className="max-w-3xl mx-auto px-10 flex items-center justify-between">
-            <a href="#" className="flex items-center gap-2.5">
+          <div className="px-12 flex items-center justify-between">
+            <a href="#" className="flex items-center gap-2 group">
               <div className="relative">
-                <Activity className="h-5 w-5 text-blue-400" />
-                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+                <Activity className="h-4 w-4 text-blue-400 group-hover:text-blue-300 transition-colors duration-200" />
+                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
               </div>
-              <span className="font-bold text-white tracking-tight text-base" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              <span className="font-bold text-white tracking-tight text-sm" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                 RadFlow<span className="text-blue-400">-Edge</span>
               </span>
             </a>
-
-            <nav className="flex items-center gap-7">
+            <nav className="flex items-center gap-6">
               {[
                 { href: "#about", label: "About" },
-                { href: "#services", label: "Features" },
+                { href: "#features", label: "Features" },
                 { href: "#pipeline", label: "Pipeline" },
-                { href: "#nearby", label: "Resources", icon: <MapPin className="h-3.5 w-3.5" /> },
+                { href: "#nearby", label: "Resources", icon: <MapPin className="h-3 w-3" /> },
               ].map(({ href, label, icon }) => (
-                <a
-                  key={href}
-                  href={href}
-                  className="flex items-center gap-1.5 text-sm text-slate-400 hover:text-white
+                <a key={href} href={href}
+                  className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-200
                              transition-colors duration-200 relative group font-medium"
                 >
-                  {icon}
-                  {label}
-                  <span className="absolute -bottom-0.5 left-0 right-0 h-px bg-blue-500 scale-x-0
-                                   group-hover:scale-x-100 transition-transform duration-200 origin-left rounded-full" />
+                  {icon}{label}
+                  <span className="absolute -bottom-0.5 left-0 right-0 h-px bg-blue-500/70 scale-x-0
+                                   group-hover:scale-x-100 transition-transform duration-300 origin-left rounded-full" />
                 </a>
               ))}
             </nav>
@@ -380,271 +336,221 @@ export function Welcome() {
         </header>
 
         {/* ── HERO ──────────────────────────────────────────────── */}
-        <section className="relative h-screen min-h-[600px] max-h-[960px] flex flex-col justify-center px-10 overflow-hidden">
-          {/* Background image */}
-          <div
-            className="absolute inset-0 -z-20 bg-cover bg-center bg-no-repeat"
+        <section className="relative h-screen flex flex-col justify-between px-12 pt-20 pb-10 overflow-hidden">
+          <div className="absolute inset-0 -z-20 bg-cover bg-center bg-no-repeat"
             style={{
               backgroundImage: "url('https://images.unsplash.com/photo-1758574437870-f83c160efd82?fm=jpg&q=85&w=2400&auto=format&fit=crop')",
-              filter: "brightness(0.28) saturate(0.7)",
+              filter: "brightness(0.18) saturate(0.5)",
             }}
           />
-          <div className="absolute inset-0 -z-10 bg-gradient-to-br from-slate-950 via-slate-950/70 to-transparent" />
-          <div className="absolute inset-0 -z-10 bg-gradient-to-t from-slate-950 via-transparent to-transparent" />
+          <div className="absolute inset-0 -z-10 bg-gradient-to-b from-slate-950/80 via-slate-950/40 to-slate-950" />
 
-          {/* Hero content */}
-          <div className="max-w-3xl w-full">
-            {/* Badge */}
-            <div className="flex items-center gap-3 mb-8">
-              <span className="inline-flex items-center gap-2 text-xs font-semibold tracking-widest
-                               text-blue-400 uppercase bg-blue-500/10 border border-blue-500/20
-                               px-4 py-1.5 rounded-full">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                AI-Powered Clinical Triage · HSIL Hackathon 2026
-              </span>
-            </div>
+          {/* Content */}
+          <div className="flex flex-col justify-center flex-1 gap-5">
+            <FadeIn delay={0}>
+              <h1 className="text-4xl xl:text-[2.75rem] font-bold text-white tracking-tight leading-[1.12]"
+                style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
+              >
+                Expert Radiology<br />
+                <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-400">
+                  at the Last Mile.
+                </span>
+              </h1>
+            </FadeIn>
 
-            <h1
-              className="text-5xl xl:text-6xl font-extrabold text-white tracking-tight leading-[1.1] mb-6"
-              style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-            >
-              Expert Radiology
-              <br />
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-teal-400 to-emerald-400">
-                at the Last Mile.
-              </span>
-            </h1>
+            <FadeIn delay={120}>
+              <p className="text-sm text-slate-400 max-w-md leading-relaxed">
+                Specialist-grade imaging intelligence for district hospitals across Bangladesh —
+                operating entirely offline, triaging critical cases in under two seconds.
+              </p>
+            </FadeIn>
 
-            <p className="text-lg text-slate-400 max-w-xl leading-relaxed mb-10 font-light">
-              RadFlow-Edge brings specialist-grade imaging intelligence to district hospitals
-              across Bangladesh — operating entirely offline, triaging critical cases in under
-              two seconds.
-            </p>
+            <FadeIn delay={220}>
+              <div className="flex items-center gap-5">
+                <a href="#features">
+                  <Button className="bg-blue-600 hover:bg-blue-500 text-white h-9 px-5 rounded-lg
+                                     font-medium text-sm transition-all duration-200 hover:-translate-y-px
+                                     shadow-md shadow-blue-900/20 hover:shadow-blue-800/30">
+                    See How It Works
+                    <ArrowRight className="ml-1.5 h-3.5 w-3.5 group-hover:translate-x-0.5 transition-transform duration-200" />
+                  </Button>
+                </a>
+                <a href="#about"
+                  className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-300
+                             transition-colors duration-200 group">
+                  About the Project
+                  <ChevronRight className="h-3.5 w-3.5 group-hover:translate-x-0.5 transition-transform duration-200" />
+                </a>
+              </div>
+            </FadeIn>
+          </div>
 
-            <div className="flex items-center gap-4">
-              <a href="#features">
-                <Button
-                  size="lg"
-                  className="bg-blue-600 hover:bg-blue-500 text-white h-12 px-7 rounded-xl
-                             font-semibold shadow-lg shadow-blue-900/30 transition-all duration-200
-                             hover:shadow-blue-800/40 hover:-translate-y-0.5 text-sm"
-                >
-                  See How It Works
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              </a>
-              <a href="#about" className="flex items-center gap-2 text-sm font-medium text-slate-400 hover:text-white transition-colors duration-200">
-                About the Project
-                <ChevronRight className="h-4 w-4" />
-              </a>
-            </div>
-
-            {/* Stats row */}
-            <div className="mt-14 pt-10 border-t border-slate-800/60 grid grid-cols-4 gap-6">
+          {/* Stats — bottom */}
+          <FadeIn delay={360}>
+            <div className="grid grid-cols-4 gap-6 pt-6 border-t border-slate-800/50">
               {[
-                { value: 64, suffix: "",  label: "Districts Covered",  prefix: "" },
-                { value: 2,  suffix: "s", label: "Avg. AI Inference",  prefix: "<" },
-                { value: 14, suffix: "+", label: "Detectable Conditions", prefix: "" },
-                { value: 99, suffix: "%", label: "TB Sensitivity",     prefix: "" },
+                { value: 64, suffix: "",  label: "Districts Covered", prefix: "" },
+                { value: 2,  suffix: "s", label: "Avg. Inference",    prefix: "<" },
+                { value: 14, suffix: "+", label: "Conditions Detected", prefix: "" },
+                { value: 99, suffix: "%", label: "TB Sensitivity",    prefix: "" },
               ].map(({ value, suffix, label, prefix }) => (
-                <div key={label} className="space-y-1">
-                  <div className="text-2xl font-bold text-white tracking-tight">
+                <div key={label}>
+                  <div className="text-lg font-bold text-white tracking-tight tabular-nums">
                     <StatCounter value={value} suffix={suffix} prefix={prefix} />
                   </div>
-                  <div className="text-xs text-slate-500 font-medium">{label}</div>
+                  <div className="text-[11px] text-slate-600 mt-0.5">{label}</div>
                 </div>
               ))}
             </div>
-          </div>
+          </FadeIn>
         </section>
 
-        {/* ── FEATURES GRID ─────────────────────────────────────── */}
-        <section id="features" className="bg-slate-950 py-20 px-10 border-t border-slate-800/50">
-          <div className="max-w-3xl mx-auto">
-            <Reveal className="mb-12">
-              <p className="text-xs font-semibold tracking-widest text-blue-400 uppercase mb-3">Core Capabilities</p>
-              <h2
-                className="text-3xl font-bold text-white tracking-tight"
-                style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-              >
-                Built for the Clinic Floor.
-                <br />
-                <span className="text-slate-400 font-normal">Not the conference room.</span>
-              </h2>
-            </Reveal>
-
-            <div className="grid grid-cols-2 gap-5">
-              {features.map((f, i) => (
-                <Reveal key={f.index} delay={i * 70}>
-                  <FeatureCard {...f} />
-                </Reveal>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* ── PIPELINE VISUALIZATION ────────────────────────────── */}
-        <section id="pipeline" className="bg-[#060b14] py-20 px-10 border-t border-slate-800/50">
-          <div className="max-w-3xl mx-auto">
-            <Reveal className="text-center mb-14">
-              <p className="text-xs font-semibold tracking-widest text-teal-400 uppercase mb-3">
-                AI Processing Pipeline
-              </p>
-              <h2
-                className="text-2xl font-bold text-white tracking-tight"
-                style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-              >
-                From raw image to structured report
-                <br />
-                <span className="text-slate-400 font-normal">in a single automated pipeline.</span>
-              </h2>
-            </Reveal>
-
-            <Reveal delay={80}>
-              {/* Step row */}
-              <div className="flex items-start gap-0">
-                {pipelineSteps.map((step, i) => (
-                  <PipelineStep key={step.number} {...step} isLast={i === pipelineSteps.length - 1} />
-                ))}
-              </div>
-
-              {/* Thin baseline rule under steps */}
-              <div className="mt-10 pt-6 border-t border-slate-800/40 flex items-center justify-center gap-2">
-                <span className="text-xs text-slate-600">Entire pipeline runs on-device</span>
-                <span className="text-slate-700">·</span>
-                <span className="text-xs text-slate-600">No PHI leaves the facility</span>
-                <span className="text-slate-700">·</span>
-                <span className="text-xs text-slate-600">Average end-to-end: &lt; 30s</span>
-              </div>
-            </Reveal>
-          </div>
-        </section>
-
-        {/* ── TRUST STRIP ───────────────────────────────────────── */}
-        <section className="bg-slate-900/40 border-y border-slate-800/50 py-10 px-10">
+        {/* ── CAPABILITIES ──────────────────────────────────────── */}
+        <section id="features" className="bg-slate-950 px-12 py-10">
           <Reveal>
-            <div className="max-w-3xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-6">
-              {[
-                { icon: <ShieldCheck className="h-4 w-4" />, label: "DICOM 3.0 Compliant" },
-                { icon: <Globe className="h-4 w-4" />,       label: "Bangladesh MoHFW Guidelines" },
-                { icon: <Zap className="h-4 w-4" />,         label: "Offline-First Architecture" },
-                { icon: <BarChart3 className="h-4 w-4" />,   label: "Retrospectively Validated" },
-              ].map(({ icon, label }) => (
-                <div key={label} className="flex items-center gap-2.5 text-slate-400">
-                  <span className="text-slate-500">{icon}</span>
-                  <span className="text-xs font-medium">{label}</span>
+            <div className="flex items-center gap-3 mb-1">
+              <span className="text-[10px] font-semibold tracking-widest text-blue-400/80 uppercase">Capabilities</span>
+              <span className="flex-1 h-px bg-slate-800/70" />
+            </div>
+            <h2 className="text-lg font-semibold text-white mb-6" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              Built for the clinic floor.{" "}
+              <span className="text-slate-600 font-normal">Not the conference room.</span>
+            </h2>
+          </Reveal>
+
+          <div className="grid grid-cols-2 gap-3">
+            {features.map((f, i) => (
+              <Reveal key={f.index} delay={i * 60}>
+                <div className="group flex items-start gap-3 p-4 rounded-xl bg-slate-900/30 border border-slate-800/40
+                                hover:bg-slate-900/60 hover:border-slate-700/50 transition-all duration-300 cursor-default">
+                  <div className="mt-0.5 p-2 rounded-lg bg-blue-500/8 border border-blue-500/10 shrink-0
+                                  group-hover:bg-blue-500/12 group-hover:border-blue-500/20 transition-all duration-300">
+                    <div className="h-3.5 w-3.5 text-blue-400">{f.icon}</div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="text-sm font-medium text-slate-200 leading-snug">{f.title}</p>
+                      <span className="text-[10px] font-bold text-blue-400/70 bg-blue-500/8 px-1.5 py-0.5 rounded-md shrink-0">
+                        {f.metric}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-relaxed">{f.description}</p>
+                  </div>
                 </div>
+              </Reveal>
+            ))}
+          </div>
+        </section>
+
+        {/* ── PIPELINE ──────────────────────────────────────────── */}
+        <section id="pipeline" className="bg-[#05080f] px-12 py-10 border-t border-slate-800/40">
+          <Reveal>
+            <div className="flex items-center gap-3 mb-1">
+              <span className="text-[10px] font-semibold tracking-widest text-slate-500 uppercase">AI Pipeline</span>
+              <span className="flex-1 h-px bg-slate-800/70" />
+            </div>
+            <h2 className="text-lg font-semibold text-white mb-8" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              Raw image to structured report.{" "}
+              <span className="text-slate-600 font-normal">Fully automated.</span>
+            </h2>
+          </Reveal>
+
+          <Reveal delay={80}>
+            <div className="flex items-start gap-0">
+              {pipelineSteps.map((step, i) => (
+                <PipelineStep key={step.number} {...step} isLast={i === pipelineSteps.length - 1} />
+              ))}
+            </div>
+            <div className="mt-8 flex items-center justify-center gap-3">
+              {["Runs on-device", "No PHI leaves the facility", "< 30s end-to-end"].map((t, i) => (
+                <React.Fragment key={t}>
+                  {i > 0 && <span className="w-1 h-1 rounded-full bg-slate-800" />}
+                  <span className="text-[11px] text-slate-700">{t}</span>
+                </React.Fragment>
               ))}
             </div>
           </Reveal>
         </section>
 
         {/* ── FOOTER ────────────────────────────────────────────── */}
-        <footer id="about" className="bg-slate-950 border-t border-slate-800/60 pt-16 pb-10 px-10">
-          <div className="max-w-3xl mx-auto">
-            <Reveal>
-              <div className="grid grid-cols-3 gap-10 mb-12">
-                {/* Brand */}
-                <div className="col-span-1 space-y-4">
-                  <div className="flex items-center gap-2.5">
-                    <Activity className="h-4 w-4 text-blue-400" />
-                    <span className="font-bold text-white text-sm tracking-tight" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                      RadFlow-Edge
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Submitted for the HSIL Hackathon 2026.
-                    <br />
-                    Improving radiology access across rural Bangladesh.
-                  </p>
-                  <Badge variant="outline" className="text-[10px] border-slate-700 text-slate-500 gap-1.5 w-fit">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    System Operational
-                  </Badge>
+        <footer id="about" className="bg-slate-950 border-t border-slate-800/40 px-12 pt-8 pb-7">
+          <Reveal>
+            <div className="grid grid-cols-3 gap-8 mb-7">
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Activity className="h-3.5 w-3.5 text-blue-400" />
+                  <span className="font-semibold text-slate-300 text-sm" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                    RadFlow-Edge
+                  </span>
                 </div>
-
-                {/* Resources */}
-                <div className="space-y-4">
-                  <h4 className="text-xs font-semibold uppercase tracking-widest text-slate-500">Resources</h4>
-                  <ul className="space-y-2.5">
-                    {[
-                      { label: "DGHS Bangladesh",  href: "https://dghs.gov.bd/" },
-                      { label: "WHO Bangladesh",   href: "https://www.who.int/bangladesh" },
-                      { label: "icddr,b Research", href: "https://www.icddrb.org/" },
-                    ].map(({ label, href }) => (
-                      <li key={label}>
-                        <a
-                          href={href}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors duration-150 group"
-                        >
-                          {label}
-                          <ExternalLink className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* Emergency */}
-                <div id="nearby" className="space-y-4">
-                  <h4 className="text-xs font-semibold uppercase tracking-widest text-slate-500">Emergency Lines</h4>
-                  <ul className="space-y-3">
-                    <li className="flex items-center gap-3">
-                      <div className="p-1.5 rounded-lg bg-red-500/10">
-                        <PhoneCall className="h-3.5 w-3.5 text-red-400" />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">National Emergency</div>
-                        <div className="text-lg font-bold text-red-400 leading-tight tracking-tight">999</div>
-                      </div>
-                    </li>
-                    <li className="flex items-center gap-3">
-                      <div className="p-1.5 rounded-lg bg-blue-500/10">
-                        <HeartPulse className="h-3.5 w-3.5 text-blue-400" />
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-slate-500 uppercase tracking-wide">Shastho Batayon</div>
-                        <div className="text-lg font-bold text-blue-400 leading-tight tracking-tight">16263</div>
-                      </div>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              {/* Bottom bar */}
-              <div className="pt-8 border-t border-slate-800/60 flex items-center justify-between gap-4">
-                <p className="text-xs text-slate-600">
-                  &copy; 2026 RadFlow-Edge. All rights reserved.
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  HSIL Hackathon 2026 — improving radiology access across rural Bangladesh.
                 </p>
-                <div className="flex items-center gap-5">
-                  <a href="#" className="text-xs text-slate-600 hover:text-slate-400 transition-colors duration-150">
-                    Terms &amp; Conditions
-                  </a>
-                  <a href="#" className="text-xs text-slate-600 hover:text-slate-400 transition-colors duration-150">
-                    Privacy Policy
-                  </a>
-                  <a href="#" className="text-xs text-slate-600 hover:text-slate-400 transition-colors duration-150">
-                    User Agreement
-                  </a>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80 animate-pulse" />
+                  <span className="text-[10px] text-slate-600">System Operational</span>
                 </div>
               </div>
-            </Reveal>
-          </div>
+
+              <div id="nearby" className="space-y-3">
+                <h4 className="text-[10px] font-semibold uppercase tracking-widest text-slate-600">Resources</h4>
+                <ul className="space-y-2">
+                  {[
+                    { label: "DGHS Bangladesh", href: "https://dghs.gov.bd/" },
+                    { label: "WHO Bangladesh",  href: "https://www.who.int/bangladesh" },
+                    { label: "icddr,b Research", href: "https://www.icddrb.org/" },
+                  ].map(({ label, href }) => (
+                    <li key={label}>
+                      <a href={href} target="_blank" rel="noopener noreferrer"
+                        className="group flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300 transition-colors duration-200">
+                        {label}
+                        <ExternalLink className="h-2.5 w-2.5 opacity-0 group-hover:opacity-60 transition-opacity duration-200" />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="text-[10px] font-semibold uppercase tracking-widest text-slate-600">Emergency</h4>
+                <ul className="space-y-2">
+                  {[
+                    { label: "National Emergency", number: "999", icon: <PhoneCall className="h-3 w-3 text-slate-500" /> },
+                    { label: "Shastho Batayon",    number: "16263", icon: <HeartPulse className="h-3 w-3 text-slate-500" /> },
+                  ].map(({ label, number, icon }) => (
+                    <li key={label} className="flex items-center gap-2">
+                      {icon}
+                      <span className="text-[11px] text-slate-500">{label}</span>
+                      <span className="text-[11px] font-bold text-slate-400 ml-auto">{number}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            <div className="pt-5 border-t border-slate-800/40 flex items-center justify-between">
+              <p className="text-[11px] text-slate-700">&copy; 2026 RadFlow-Edge. All rights reserved.</p>
+              <div className="flex items-center gap-4">
+                {["Terms", "Privacy", "Agreement"].map(t => (
+                  <a key={t} href="#"
+                    className="text-[11px] text-slate-700 hover:text-slate-500 transition-colors duration-200">{t}</a>
+                ))}
+              </div>
+            </div>
+          </Reveal>
         </footer>
       </div>
 
       {/* ── RIGHT PANEL – AUTH ──────────────────────────────────── */}
-      <div className="w-[380px] shrink-0 h-full flex flex-col bg-white relative overflow-hidden shadow-[-24px_0_48px_-12px_rgba(0,0,0,0.4)] z-20">
+      <div className="w-[40%] shrink-0 h-full flex flex-col bg-white relative overflow-hidden shadow-[-24px_0_48px_-12px_rgba(0,0,0,0.4)] z-20">
         <div className="absolute -top-24 -right-24 w-64 h-64 bg-blue-100 rounded-full blur-3xl opacity-40 pointer-events-none" />
         <div className="absolute -bottom-20 -left-20 w-56 h-56 bg-teal-100 rounded-full blur-3xl opacity-30 pointer-events-none" />
 
-        <div className="flex-1 overflow-y-auto px-10 py-12 relative z-10">
-          <div className="max-w-[320px] mx-auto">
+        <div className="flex-1 overflow-y-auto flex flex-col justify-center px-10 py-8 relative z-10">
+          <div className="max-w-[320px] w-full mx-auto">
 
             {/* Brand mark */}
-            <div className="flex items-center gap-2 mb-10">
+            <div className="flex items-center gap-2 mb-6">
               <div className="p-1.5 bg-blue-600 rounded-lg">
                 <Activity className="h-4 w-4 text-white" />
               </div>
@@ -654,8 +560,8 @@ export function Welcome() {
             </div>
 
             {/* Auth header */}
-            <div className="mb-8">
-              <div className="inline-flex items-center gap-1.5 bg-slate-100 rounded-full px-3 py-1.5 mb-4">
+            <div className="mb-5">
+              <div className="inline-flex items-center gap-1.5 bg-slate-100 rounded-full px-3 py-1.5 mb-3">
                 <Stethoscope className="h-3.5 w-3.5 text-blue-600" />
                 <span className="text-xs font-semibold text-slate-600 tracking-wide">Clinical Portal</span>
               </div>
@@ -673,7 +579,7 @@ export function Welcome() {
             </div>
 
             {/* Toggle tabs */}
-            <div className="flex bg-slate-100 p-1 rounded-xl mb-7 gap-1">
+            <div className="flex bg-slate-100 p-1 rounded-xl mb-5 gap-1">
               {[{ id: true, label: "Sign In" }, { id: false, label: "Register" }].map(({ id, label }) => (
                 <button
                   key={label}
@@ -803,7 +709,7 @@ export function Welcome() {
             </form>
 
             {/* Divider */}
-            <div className="relative my-6">
+            <div className="relative my-4">
               <div className="absolute inset-0 flex items-center">
                 <div className="w-full border-t border-slate-100" />
               </div>
@@ -824,7 +730,7 @@ export function Welcome() {
             </button>
 
             {/* Trust footer */}
-            <div className="mt-8 pt-6 border-t border-slate-100">
+            <div className="mt-5 pt-4 border-t border-slate-100">
               <div className="flex items-center justify-center gap-4">
                 {[
                   { icon: <ShieldCheck className="h-3.5 w-3.5" />, label: "Secure Gateway" },

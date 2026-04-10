@@ -196,15 +196,15 @@ def _format_uptime(delta: timedelta) -> str:
 
 def _format_case_time_local(dt: Optional[datetime]) -> str:
     if not dt:
-        return "00:00"
+        return "—"
 
     try:
         # Keep naive datetimes as-is (already local in our dataset/seeding).
         if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-            return dt.strftime("%H:%M")
-        return dt.astimezone().strftime("%H:%M")
+            return dt.strftime("%d %b %Y · %H:%M")
+        return dt.astimezone().strftime("%d %b %Y · %H:%M")
     except Exception:
-        return dt.strftime("%H:%M")
+        return dt.strftime("%d %b %Y · %H:%M")
 
 
 def _observability_log_path() -> str:

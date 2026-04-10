@@ -190,11 +190,13 @@ export function SpecialistReview() {
         <div className="text-center">
           <AlertCircle className="h-8 w-8 text-red-600 mx-auto mb-4" />
           <p className="text-red-600 mb-4">{error || "Escalation not found"}</p>
-          <Link to="/dashboard/escalations">
-            <Button>
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Escalations
-            </Button>
+          <Link
+            to="/dashboard/escalations"
+            title="Back to Escalations"
+            className="inline-flex items-center justify-center p-2 rounded-lg text-slate-500
+                       hover:bg-slate-100 hover:text-slate-900 transition-colors duration-150"
+          >
+            <ArrowLeft className="h-4 w-4" />
           </Link>
         </div>
       </div>
@@ -206,17 +208,23 @@ export function SpecialistReview() {
       {/* Header */}
       <div className="bg-white border-b border-slate-200 px-6 py-4 shrink-0">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link to="/dashboard/escalations">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back to Escalations
-              </Button>
+          <div className="flex items-center gap-3">
+            <Link
+              to="/dashboard/escalations"
+              title="Back to Escalations"
+              className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900
+                         transition-colors duration-150 shrink-0"
+            >
+              <ArrowLeft className="h-4 w-4" />
             </Link>
-            <Separator orientation="vertical" className="h-6" />
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">Specialist Review: {escalation.patientId}</h2>
-              <p className="text-sm text-slate-600">{escalation.name} - {escalation.age} / {escalation.sex}</p>
+            <Separator orientation="vertical" className="h-5" />
+            <div className="flex items-center gap-1.5 text-sm flex-wrap">
+              <span className="font-mono text-xs font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
+                {escalation.patientId}
+              </span>
+              <span className="text-slate-700 font-medium">{escalation.name}</span>
+              <span className="text-slate-300">·</span>
+              <span className="text-slate-500">{escalation.age} / {escalation.sex}</span>
             </div>
           </div>
 

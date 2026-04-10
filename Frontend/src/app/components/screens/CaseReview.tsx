@@ -16,9 +16,9 @@ import {
   ChevronUp,
   Loader2
 } from "lucide-react";
+import { useHeader } from "../AppLayout";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Separator } from "../ui/separator";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -36,6 +36,7 @@ export function CaseReview() {
   const IMAGE_FRAME_HEIGHT = 600;
   const { patientId } = useParams();
   const navigate = useNavigate();
+  const { setSlots, clearSlots } = useHeader();
   const [caseData, setCaseData] = useState<CaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -356,6 +357,107 @@ export function CaseReview() {
     }
   };
 
+  /* ── inject header slots whenever caseData changes ── */
+  useEffect(() => {
+    if (!caseData) return;
+
+    const studyLabel = caseData.imagePath
+      ? caseData.imagePath.split("/").pop()?.split(".")[0] ?? "Study"
+      : "Study";
+
+    setSlots({
+      left: (
+        <div className="flex items-center gap-3 min-w-0">
+          {/* Icon-only back button */}
+          <Link
+            to="/dashboard"
+            title="Back to Patient Queue"
+            className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900
+                       transition-colors duration-150 shrink-0"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Link>
+
+          <div className="w-px h-5 bg-slate-200 shrink-0" />
+
+          {/* Patient info chip */}
+          <div className="flex items-center gap-1.5 text-sm min-w-0 flex-wrap">
+            <span className="font-mono text-xs font-semibold text-slate-500 bg-slate-100
+                             px-1.5 py-0.5 rounded shrink-0">
+              {caseData.patientId}
+            </span>
+            <span className="text-slate-700 font-medium truncate max-w-[140px]">{caseData.name}</span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-500 shrink-0">{caseData.age} / {caseData.sex}</span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-500 capitalize shrink-0">{studyLabel}</span>
+          </div>
+        </div>
+      ),
+      right: (
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-red-700 border-red-300 hover:bg-red-50 h-8 text-xs px-3"
+            onClick={handleIsolate}
+            disabled={actionLoading}
+          >
+            <AlertCircle className="h-3.5 w-3.5 mr-1.5" />
+            Isolate
+          </Button>
+          <Button
+            variant={genexpertOrdered ? "secondary" : "outline"}
+            size="sm"
+            className={`h-8 text-xs px-3 ${genexpertOrdered ? "bg-green-50 text-green-700 hover:bg-green-100 border-green-200" : ""}`}
+            onClick={() => setGenexpertOrdered(true)}
+          >
+            <Activity className="h-3.5 w-3.5 mr-1.5" />
+            {genexpertOrdered ? "GeneXpert Ordered" : "Order GeneXpert"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs px-3"
+            onClick={handleEscalate}
+            disabled={actionLoading}
+          >
+            <TrendingUp className="h-3.5 w-3.5 mr-1.5" />
+            Escalate
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs px-3"
+            onClick={runDualConsensus}
+            disabled={actionLoading}
+          >
+            {actionLoading
+              ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              : <Activity className="h-3.5 w-3.5 mr-1.5" />
+            }
+            Consensus
+          </Button>
+          <Button
+            size="sm"
+            className="bg-slate-900 hover:bg-slate-800 h-8 text-xs px-3"
+            onClick={handleSaveToEHR}
+            disabled={actionLoading}
+          >
+            {actionLoading
+              ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              : <FileText className="h-3.5 w-3.5 mr-1.5" />
+            }
+            Save to EHR
+          </Button>
+        </div>
+      ),
+    });
+
+    return () => clearSlots();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseData, genexpertOrdered, actionLoading]);
+
   if (loading) {
     return (
       <div className="h-full flex flex-col items-center justify-center bg-slate-50">
@@ -376,220 +478,161 @@ export function CaseReview() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-200 px-6 py-4 shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link to="/dashboard">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="h-4 w-4 mr-2" />
-                Back to Worklist
-              </Button>
-            </Link>
-            <Separator orientation="vertical" className="h-6" />
-            <div>
-              <h2 className="text-xl font-semibold text-slate-900">Case Review: {caseData.patientId}</h2>
-              <p className="text-sm text-slate-600">{caseData.name} - {caseData.age} / {caseData.sex}</p>
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <Button variant="outline" className="text-red-700 border-red-300 hover:bg-red-50" onClick={handleIsolate} disabled={actionLoading}>
-              <AlertCircle className="h-4 w-4 mr-2" />
-              Isolate Patient
-            </Button>
-            <Button 
-              variant={genexpertOrdered ? "secondary" : "outline"} 
-              className={genexpertOrdered ? "bg-green-50 text-green-700 hover:bg-green-100 border-green-200" : ""}
-              onClick={() => setGenexpertOrdered(true)}
-            >
-              <Activity className="h-4 w-4 mr-2" />
-              {genexpertOrdered ? "GeneXpert Ordered" : "Order GeneXpert"}
-            </Button>
-            <Button variant="outline" onClick={handleEscalate} disabled={actionLoading}>
-              <TrendingUp className="h-4 w-4 mr-2" />
-              Escalate to Specialist
-            </Button>
-            <Button variant="outline" onClick={runDualConsensus} disabled={actionLoading}>
-              {actionLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Activity className="h-4 w-4 mr-2" />}
-              Run Dual Consensus
-            </Button>
-            <Button className="bg-slate-900 hover:bg-slate-800" onClick={handleSaveToEHR} disabled={actionLoading}>
-              {actionLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileText className="h-4 w-4 mr-2" />}
-              Save to EHR
-            </Button>
-          </div>
-        </div>
-      </div>
-
       {/* Main Content - 3 Column Layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Patient Context */}
         <div className="w-80 border-r border-slate-200 bg-white overflow-auto">
           <ScrollArea className="h-full">
-            <div className="p-4 space-y-4">
-              <div className="text-xs px-3 py-2 rounded-md border border-slate-200 bg-slate-50 text-slate-600">
-                {autosaveState === "saving" && "Saving patient details..."}
-                {autosaveState === "saved" && "All patient details saved."}
-                {autosaveState === "error" && "Auto-save failed. Keep editing; retry will happen on next change."}
-                {autosaveState === "idle" && "Patient detail edits are auto-saved."}
+            <div className="p-4 space-y-3">
+
+              {/* Autosave status — compact top strip */}
+              <div className="flex items-center gap-1.5 px-1">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                  autosaveState === "saving" ? "bg-blue-400 animate-pulse" :
+                  autosaveState === "saved"  ? "bg-emerald-400" :
+                  autosaveState === "error"  ? "bg-red-400" : "bg-slate-300"
+                }`} />
+                <span className="text-[11px] text-slate-500">
+                  {autosaveState === "saving" ? "Saving…" :
+                   autosaveState === "saved"  ? "All changes saved" :
+                   autosaveState === "error"  ? "Save failed — will retry" : "Edits auto-saved"}
+                </span>
               </div>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Demographics</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Patient ID:</span>
-                    <span className="font-mono">{caseData.patientId}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Name:</span>
-                    <span className="font-medium">{caseData.name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Age / Sex:</span>
-                    <span>{caseData.age} years / {caseData.sex}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Study Type:</span>
-                    <span>{caseData.studyType}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Study Time:</span>
-                    <span>{caseData.timeReceived}</span>
-                  </div>
-                </CardContent>
-              </Card>
+              {/* ── DEMOGRAPHICS ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Demographics</p>
+                </div>
+                <div className="px-3.5 py-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2.5 items-baseline">
+                  <span className="text-xs text-slate-500 whitespace-nowrap">Patient ID</span>
+                  <span className="font-mono text-xs font-semibold text-slate-800 bg-slate-100 px-1.5 py-0.5 rounded w-fit">
+                    {caseData.patientId}
+                  </span>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Presenting Complaint</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-slate-700 leading-relaxed">
-                    {caseData.complaint}
-                  </p>
-                </CardContent>
-              </Card>
+                  <span className="text-xs text-slate-500">Name</span>
+                  <span className="text-sm font-semibold text-slate-900">{caseData.name}</span>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Vital Signs</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Temperature:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      type="number"
-                      step="0.1"
-                      value={caseData.vitalTemp ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalTemp: e.target.value ? Number(e.target.value) : undefined })}
-                    />
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Heart Rate:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      type="number"
-                      value={caseData.vitalHr ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalHr: e.target.value ? Number(e.target.value) : undefined })}
-                    />
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">BP:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      value={caseData.vitalBp ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalBp: e.target.value || undefined })}
-                    />
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Resp Rate:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      type="number"
-                      value={caseData.vitalResp ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalResp: e.target.value ? Number(e.target.value) : undefined })}
-                    />
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">SpO2:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      type="number"
-                      step="0.1"
-                      value={caseData.vitalSpo2 ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalSpo2: e.target.value ? Number(e.target.value) : undefined })}
-                    />
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Weight:</span>
-                    <Input
-                      className="h-7 w-28 text-right"
-                      type="number"
-                      step="0.1"
-                      value={caseData.vitalWeight ?? ""}
-                      onChange={(e) => queueCaseAutosave({ vitalWeight: e.target.value ? Number(e.target.value) : undefined })}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
+                  <span className="text-xs text-slate-500">Age / Sex</span>
+                  <span className="text-sm text-slate-800">{caseData.age} y / {caseData.sex}</span>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Risk Factors & History</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
+                  <span className="text-xs text-slate-500">Study Type</span>
+                  <span className="text-sm text-slate-800">{caseData.studyType}</span>
+
+                  <span className="text-xs text-slate-500">Study Time</span>
+                  <span className="text-sm text-slate-800">{caseData.timeReceived}</span>
+                </div>
+              </div>
+
+              {/* ── PRESENTING COMPLAINT ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Presenting Complaint</p>
+                </div>
+                <div className="px-3.5 py-3">
+                  <div className="border-l-[3px] border-blue-500 pl-3 py-1">
+                    <p className="text-sm text-slate-900 font-medium leading-relaxed">{caseData.complaint}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* ── VITAL SIGNS ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Vital Signs</p>
+                </div>
+                <div className="p-3 grid grid-cols-2 gap-2">
+                  {([
+                    { label: "TEMP",  unit: "°C",   type: "number", step: "0.1", value: caseData.vitalTemp,   key: "vitalTemp"   as const },
+                    { label: "HR",    unit: "bpm",  type: "number", step: "1",   value: caseData.vitalHr,     key: "vitalHr"     as const },
+                    { label: "BP",    unit: "mmHg", type: "text",   step: "",    value: caseData.vitalBp,     key: "vitalBp"     as const },
+                    { label: "RESP",  unit: "/min", type: "number", step: "1",   value: caseData.vitalResp,   key: "vitalResp"   as const },
+                    { label: "SpO₂",  unit: "%",    type: "number", step: "0.1", value: caseData.vitalSpo2,   key: "vitalSpo2"   as const },
+                    { label: "WT",    unit: "kg",   type: "number", step: "0.1", value: caseData.vitalWeight, key: "vitalWeight" as const },
+                  ] as Array<{ label: string; unit: string; type: string; step: string; value: number | string | undefined; key: keyof typeof caseData }>).map((v) => (
+                    <div key={v.key} className="bg-slate-50/80 rounded-md px-2.5 py-2 flex flex-col gap-1 border border-slate-100">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-500 tracking-wide">{v.label}</span>
+                        <span className="text-[10px] text-slate-400">{v.unit}</span>
+                      </div>
+                      <Input
+                        className="h-6 text-sm bg-white border-slate-200 px-2 text-slate-800 focus-visible:ring-blue-500/40"
+                        type={v.type}
+                        step={v.step || undefined}
+                        value={v.value ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (v.type === "text") {
+                            queueCaseAutosave({ [v.key]: raw || undefined } as Partial<CaseData>);
+                          } else {
+                            queueCaseAutosave({ [v.key]: raw ? Number(raw) : undefined } as Partial<CaseData>);
+                          }
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── RISK FACTORS & HISTORY ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Risk Factors & History</p>
+                </div>
+                <div className="p-3">
                   <Textarea
                     rows={3}
+                    className="text-sm resize-none border-slate-200"
                     value={caseData.riskFactors ?? ""}
-                    placeholder="Smoking, previous TB exposure, immunocompromised state..."
+                    placeholder="Smoking, previous TB exposure, immunocompromised state…"
                     onChange={(e) => queueCaseAutosave({ riskFactors: e.target.value || undefined })}
                   />
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              <Card className="bg-amber-50 border-amber-200">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium text-amber-900">Clinical Notes</CardTitle>
-                </CardHeader>
-                <CardContent>
+              {/* ── CLINICAL NOTES ── */}
+              <div className="rounded-lg border border-slate-200 border-l-[3px] border-l-amber-400 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">Clinical Notes</p>
+                </div>
+                <div className="p-3">
                   <Textarea
                     rows={4}
-                    className="bg-white"
+                    className="text-sm resize-none border-slate-200"
                     value={caseData.clinicalNotes ?? ""}
-                    placeholder="Clinician notes..."
+                    placeholder="Clinician notes…"
                     onChange={(e) => queueCaseAutosave({ clinicalNotes: e.target.value || undefined })}
                   />
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Differential & Plan</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div>
-                    <div className="text-xs text-slate-500 mb-1">Differential Diagnosis</div>
+              {/* ── DIFFERENTIAL & PLAN ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Differential & Plan</p>
+                </div>
+                <div className="p-3 space-y-3">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-slate-600">Differential Diagnosis</p>
                     <Textarea
                       rows={3}
+                      className="text-sm resize-none border-slate-200"
                       value={caseData.differentialDiagnosis ?? ""}
                       onChange={(e) => queueCaseAutosave({ differentialDiagnosis: e.target.value || undefined })}
                     />
                   </div>
-                  <div>
-                    <div className="text-xs text-slate-500 mb-1">Recommended Steps</div>
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-slate-600">Recommended Steps</p>
                     <Textarea
                       rows={3}
+                      className="text-sm resize-none border-slate-200"
                       value={caseData.recommendedSteps ?? ""}
                       onChange={(e) => queueCaseAutosave({ recommendedSteps: e.target.value || undefined })}
                     />
                   </div>
-                </CardContent>
-              </Card>
+                </div>
+              </div>
+
             </div>
           </ScrollArea>
         </div>
@@ -697,227 +740,220 @@ export function CaseReview() {
         {/* Right Panel - AI Findings */}
         <div className="w-96 border-l border-slate-200 bg-white overflow-auto">
           <ScrollArea className="h-full">
-            <div className="p-4 space-y-4">
-              {/* AI Status Banner - Shows when analysis is complete or pending */}
+            <div className="p-4 space-y-3">
+
+              {/* ── AI STATUS BANNER ── */}
               {showHighPriorityAlert ? (
-                <Card className="border-red-300 bg-red-50">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-lg font-semibold text-red-900">High Priority</CardTitle>
-                      <Badge variant="destructive" className="text-sm">
-                        {topFinding?.disease || "Critical finding"}
-                      </Badge>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-red-800 leading-relaxed">
-                      {topFinding?.report || caseData.aiDraftReport || "AI analysis is complete. Review findings and proceed with clinical decision making."}
-                    </p>
-                  </CardContent>
-                </Card>
+                <div className="rounded-lg border border-red-200 border-l-[3px] border-l-red-500 bg-red-50/30 px-4 py-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-red-600">High Priority</p>
+                    <Badge variant="destructive" className="text-[11px]">
+                      {topFinding?.disease?.replace(/_/g, " ") || "Critical finding"}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-slate-700 leading-relaxed">
+                    {topFinding?.report || caseData.aiDraftReport || "AI analysis complete. Review findings and proceed with clinical decision."}
+                  </p>
+                </div>
               ) : hasAiOutput ? (
-                <Card className="border-amber-300 bg-amber-50">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-lg font-semibold text-amber-900">Needs Review</CardTitle>
-                      <Badge variant="outline" className="text-sm border-amber-300 text-amber-800">
-                        low confidence
-                      </Badge>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-sm text-amber-900 leading-relaxed">
-                      AI output is available, but confidence is below the escalation threshold. Review with clinical context before urgent actions.
-                    </p>
-                  </CardContent>
-                </Card>
+                <div className="rounded-lg border border-amber-200 border-l-[3px] border-l-amber-400 bg-amber-50/30 px-4 py-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-amber-700">Needs Review</p>
+                    <Badge variant="outline" className="text-[11px] border-amber-300 text-amber-700">
+                      low confidence
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-slate-600 leading-relaxed">
+                    AI output available but confidence is below escalation threshold. Review with clinical context.
+                  </p>
+                </div>
               ) : (
-                 <Card className="border-blue-100 bg-blue-50/50">
-                   <CardContent className="py-6 text-center">
-                     <Activity className="h-8 w-8 text-blue-500 animate-pulse mx-auto mb-3" />
-                     <p className="text-sm font-medium text-blue-900">AI Triage in Progress</p>
-                     <p className="text-xs text-blue-700 mt-1">Automatic prioritization and clinical tagging...</p>
-                   </CardContent>
-                 </Card>
+                <div className="rounded-lg border border-blue-100 bg-blue-50/30 py-5 flex flex-col items-center gap-2">
+                  <Activity className="h-6 w-6 text-blue-500 animate-pulse" />
+                  <p className="text-sm font-semibold text-slate-700">AI Triage in Progress</p>
+                  <p className="text-xs text-slate-500">Automatic prioritization and clinical tagging…</p>
+                </div>
               )}
 
-              {/* Confidence Score - Only show if data is ready */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">AI Confidence</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {hasAiOutput ? (
-                    <>
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1">
-                          <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-green-500" 
-                              style={{ width: `${liveConfidence}%` }}
-                            ></div>
-                          </div>
-                        </div>
-                        <span className="text-2xl font-semibold text-green-700">
-                          {liveConfidence}%
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-600 mt-2">
-                        {hasLiveFindings ? "Live confidence from current model findings." : "Using case-level confidence."}
-                      </p>
-                    </>
-                  ) : (
-                    <div className="py-4 text-center">
-                      {caseData.aiStatus === "analyzing" ? (
-                        <>
-                          <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto mb-2" />
-                          <p className="text-sm text-slate-500 italic">AI Analysis in Progress...</p>
-                        </>
-                      ) : (
-                        <p className="text-sm text-slate-500 italic">Confidence will appear once AI output is available.</p>
-                      )}
-                    </div>
+              {/* ── AI CONFIDENCE ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200 flex items-center justify-between">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">AI Confidence</p>
+                  {hasAiOutput && (
+                    <span className={`text-sm font-bold tabular-nums
+                      ${liveConfidence >= 85 ? "text-emerald-600" : liveConfidence >= 70 ? "text-amber-600" : "text-red-600"}`}>
+                      {liveConfidence}%
+                    </span>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+                <div className="px-3.5 py-3">
+                  {hasAiOutput ? (
+                    <div className="space-y-1.5">
+                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500
+                            ${liveConfidence >= 85 ? "bg-emerald-500" : liveConfidence >= 70 ? "bg-amber-400" : "bg-red-500"}`}
+                          style={{ width: `${liveConfidence}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        {hasLiveFindings ? "Live — from current model findings" : "Case-level confidence"}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500 italic">
+                      {caseData.aiStatus === "analyzing" ? "Analysis in progress…" : "Awaiting AI output"}
+                    </p>
+                  )}
+                </div>
+              </div>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Model Consensus</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
+              {/* ── MODEL CONSENSUS ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Model Consensus</p>
+                </div>
+                <div className="px-3.5 py-3">
                   {latestLedger ? (
-                    <>
+                    <div className="space-y-2.5 text-sm">
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-600">Consensus State</span>
-                        <Badge variant={latestLedger.consensusState === "disagree" ? "destructive" : "outline"}>
-                          {latestLedger.consensusState || "not_run"}
+                        <span className="text-slate-600">Consensus</span>
+                        <Badge
+                          variant={latestLedger.consensusState === "disagree" ? "destructive" : "outline"}
+                          className="text-[11px] capitalize"
+                        >
+                          {latestLedger.consensusState || "not run"}
                         </Badge>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-slate-600">Risk Band</span>
-                        <Badge variant="outline">{latestLedger.riskBand || "low"}</Badge>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-2 h-2 rounded-full shrink-0
+                            ${latestLedger.riskBand === "high"   ? "bg-red-500"    :
+                              latestLedger.riskBand === "medium" ? "bg-amber-400"  : "bg-emerald-500"}`}
+                          />
+                          <span className="text-slate-800 capitalize font-medium">{latestLedger.riskBand || "low"}</span>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-600">Calibrated Confidence</span>
-                        <span className="font-semibold text-slate-900">{Math.round((latestLedger.calibratedConfidence || 0) * 100)}%</span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-slate-500 italic">No ledger entry yet for this case.</div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Rationale & Safety</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  {latestLedger ? (
-                    <>
-                      <div className="flex justify-between">
                         <span className="text-slate-600">Uncertainty</span>
-                        <span>{Math.round((latestLedger.uncertainty || 0) * 100)}%</span>
+                        <span className="text-slate-800 font-medium">
+                          {Math.round((latestLedger.uncertainty || 0) * 100)}%
+                        </span>
                       </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-600">Expected Error Bin</span>
-                        <span className="capitalize">{latestLedger.expectedErrorBin || "n/a"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-600">Policy Action</span>
-                        <span className="capitalize">{latestLedger.policyAction || "no_change"}</span>
-                      </div>
-                    </>
+                    </div>
                   ) : (
-                    <div className="text-slate-500 italic">Run analysis to populate rationale details.</div>
+                    <p className="text-xs text-slate-500 italic">No ledger entry yet for this case.</p>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              {/* Key Findings */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Key Findings</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
+              {/* ── KEY FINDINGS ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Key Findings</p>
+                </div>
+                <div className="px-3.5 py-3">
                   {findingsLoading ? (
-                    <div className="py-2 text-sm text-slate-500 italic">Refreshing live findings...</div>
+                    <p className="text-xs text-slate-500 italic">Refreshing live findings…</p>
                   ) : findings.length === 0 ? (
-                    <div className="py-2 text-sm text-slate-500 italic">No live findings available for this case yet.</div>
+                    <p className="text-xs text-slate-500 italic">No live findings available yet.</p>
                   ) : (
-                    findings.slice(0, 5).map((finding, idx) => {
-                      const badgeVariant = idx === 0 ? "destructive" : "outline";
-                      const conf = fmtConfidence(finding.confidence);
-                      return (
-                        <div key={`${finding.disease}-${idx}`} className="flex items-start gap-2">
-                          <Badge variant={badgeVariant} className="shrink-0 mt-0.5">{idx + 1}</Badge>
-                          <div className="text-sm">
-                            <div className="font-medium text-slate-900">{finding.disease.replace(/_/g, " ")}</div>
-                            <div className="text-slate-600 text-xs mt-0.5">
-                              Confidence: {conf}%
-                              {finding.bbox_x1 != null && finding.bbox_y1 != null && finding.bbox_x2 != null && finding.bbox_y2 != null
-                                ? ` | BBox: (${finding.bbox_x1}, ${finding.bbox_y1})-(${finding.bbox_x2}, ${finding.bbox_y2})`
-                                : ""}
+                    <div className="space-y-3">
+                      {findings.slice(0, 5).map((finding, idx) => {
+                        const conf = fmtConfidence(finding.confidence);
+                        return (
+                          <div key={`${finding.disease}-${idx}`} className="flex items-start gap-2.5">
+                            <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 mt-0.5
+                              ${idx === 0 ? "bg-red-100 text-red-700 ring-1 ring-red-200" : "bg-slate-100 text-slate-600"}`}>
+                              {idx + 1}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-medium text-slate-900 capitalize leading-tight">
+                                  {finding.disease.replace(/_/g, " ")}
+                                </p>
+                                <span className={`text-xs font-semibold tabular-nums shrink-0
+                                  ${conf >= 85 ? "text-emerald-600" : conf >= 70 ? "text-amber-600" : "text-slate-500"}`}>
+                                  {conf}%
+                                </span>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      );
-                    })
+                        );
+                      })}
+                    </div>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              {/* Differential Diagnosis */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Differential Diagnosis</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
+              {/* ── DIFFERENTIAL DIAGNOSIS ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Differential Diagnosis</p>
+                </div>
+                <div className="px-3.5 py-3">
                   {caseData.differentialDiagnosis ? (
-                    <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{caseData.differentialDiagnosis}</div>
+                    <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                      {caseData.differentialDiagnosis}
+                    </p>
                   ) : findings.length > 0 ? (
-                    findings.slice(0, 3).map((finding, idx) => (
-                      <div key={`ddx-${idx}`} className="flex items-center justify-between">
-                        <span className="text-slate-700">{finding.disease.replace(/_/g, " ")}</span>
-                        <Badge variant={idx === 0 ? "destructive" : "outline"}>{idx === 0 ? "Primary" : "Consider"}</Badge>
-                      </div>
-                    ))
+                    <div className="space-y-2">
+                      {findings.slice(0, 3).map((finding, idx) => (
+                        <div key={`ddx-${idx}`} className="flex items-center justify-between">
+                          <span className="text-sm text-slate-800 capitalize">
+                            {finding.disease.replace(/_/g, " ")}
+                          </span>
+                          <Badge
+                            variant={idx === 0 ? "destructive" : "outline"}
+                            className="text-[11px]"
+                          >
+                            {idx === 0 ? "Primary" : "Consider"}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
                   ) : (
-                    <div className="text-slate-500 italic">No differential diagnosis has been generated yet.</div>
+                    <p className="text-xs text-slate-500 italic">No differential generated yet.</p>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              {/* Recommended Actions */}
-              <Card className="bg-blue-50 border-blue-200">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium text-blue-900">Recommended Next Steps</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm text-blue-800">
+              {/* ── RECOMMENDED NEXT STEPS ── */}
+              <div className="rounded-lg border border-slate-200 border-l-[3px] border-l-blue-500 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-blue-600">Recommended Next Steps</p>
+                </div>
+                <div className="px-3.5 py-3">
                   {recommendedSteps.length > 0 ? (
-                    recommendedSteps.map((step, idx) => (
-                      <div key={`step-${idx}`} className="flex items-start gap-2">
-                        <span className="shrink-0 font-semibold">{idx + 1}.</span>
-                        <span>{step}</span>
-                      </div>
-                    ))
+                    <div className="space-y-2">
+                      {recommendedSteps.map((step, idx) => (
+                        <div key={`step-${idx}`} className="flex items-start gap-2 text-sm text-slate-800">
+                          <span className="shrink-0 font-semibold text-blue-500 tabular-nums">{idx + 1}.</span>
+                          <span className="leading-snug">{step}</span>
+                        </div>
+                      ))}
+                    </div>
                   ) : (
-                    <div className="text-sm text-blue-800">No model-generated recommendations yet. Trigger analysis from the current experiment to populate this section.</div>
+                    <p className="text-xs text-slate-500 italic">
+                      No model-generated recommendations yet. Trigger analysis to populate.
+                    </p>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">AI Draft Report</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm space-y-2 text-slate-700 leading-relaxed">
-                    <div className="whitespace-pre-wrap">{caseData.aiDraftReport || 'AI Draft Report has not been generated for this case.'}</div>
-                  </div>
-                </CardContent>
-              </Card>
+              {/* ── AI DRAFT REPORT ── */}
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">AI Draft Report</p>
+                </div>
+                <div className="px-3.5 py-3">
+                  <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
+                    {caseData.aiDraftReport || "AI Draft Report has not been generated for this case."}
+                  </p>
+                </div>
+              </div>
+
             </div>
           </ScrollArea>
         </div>
