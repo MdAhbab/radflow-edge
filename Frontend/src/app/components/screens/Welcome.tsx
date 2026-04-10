@@ -17,11 +17,13 @@ import { Label } from "../ui/label";
 import { Badge } from "../ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Separator } from "../ui/separator";
+import { api, SystemStatus } from "../../../api";
 
 export function Welcome() {
   const navigate = useNavigate();
   const [isLogin, setIsLogin] = useState(true);
   const [scrolled, setScrolled] = useState(false);
+  const [mission, setMission] = useState<SystemStatus | null>(null);
   
   // Form state
   const [formData, setFormData] = useState({
@@ -58,6 +60,18 @@ export function Welcome() {
       leftPanel.addEventListener("scroll", handleScroll);
       return () => leftPanel.removeEventListener("scroll", handleScroll);
     }
+  }, []);
+
+  useEffect(() => {
+    const loadMission = async () => {
+      try {
+        const status = await api.getSystemStatus();
+        setMission(status);
+      } catch {
+        setMission(null);
+      }
+    };
+    loadMission();
   }, []);
 
   const handleAuthSubmit = (e: React.FormEvent) => {
@@ -138,11 +152,38 @@ export function Welcome() {
             Bringing expert-level radiology insights to the furthest reaches of Bangladesh. 
             Operate fully offline, prioritize critical cases instantly, and save lives when every second counts.
           </p>
+
+          <div className="bg-slate-900/60 border border-slate-700 rounded-2xl p-4 max-w-3xl w-full mb-8 backdrop-blur-sm">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-left text-sm">
+              <div>
+                <p className="text-slate-400">Pipeline</p>
+                <p className="text-white font-semibold">{mission?.active_model || "unknown"}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Queue</p>
+                <p className="text-white font-semibold">{mission?.queue_length ?? "--"}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Urgency</p>
+                <p className="text-white font-semibold">{mission?.estimated_wait_time || "--"}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Recent Errors</p>
+                <p className="text-white font-semibold">{mission?.recent_errors ?? "--"}</p>
+              </div>
+              <div>
+                <p className="text-slate-400">Health</p>
+                <p className="text-emerald-300 font-semibold">{mission?.status || "offline"}</p>
+              </div>
+            </div>
+          </div>
           
           <div className="flex gap-4">
             <Button size="lg" className="bg-blue-600 hover:bg-blue-700 text-white rounded-full px-8 py-6 text-base font-semibold shadow-xl shadow-blue-900/20">
               Explore Our Tech <ChevronRight className="ml-2 h-5 w-5" />
             </Button>
+            <Button size="lg" variant="outline" className="rounded-full px-8 py-6 text-base" onClick={() => navigate("/dashboard/new-report")}>New Report</Button>
+            <Button size="lg" variant="outline" className="rounded-full px-8 py-6 text-base" onClick={() => navigate("/dashboard")}>Urgent Queue</Button>
           </div>
         </div>
 

@@ -3,8 +3,12 @@ import shutil
 import uuid
 import sys
 import time
+import json
+import queue
+import threading
 import tempfile
 import traceback
+import hashlib
 import importlib.util
 from datetime import timedelta
 from fastapi import FastAPI, Depends, HTTPException, File, UploadFile
@@ -14,8 +18,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from collections import defaultdict, deque
 
-from database import SessionLocal, Case, Finding, Escalation, SystemStats
+from database import (
+    SessionLocal,
+    Case,
+    Finding,
+    Escalation,
+    SystemStats,
+    InferenceLedger,
+    InferenceJob,
+    EscalationEvent,
+)
 
 app = FastAPI(title="HSIL Hackathon API")
 
@@ -67,6 +81,28 @@ RECENT_ERROR_COUNT = 0
 ACTIVE_USER_WINDOW_SECONDS = 300
 REQUEST_ACTIVITY: Dict[str, datetime] = {}
 
+# Endpoint telemetry and reliability metrics.
+ENDPOINT_METRICS: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "errors": 0, "total_ms": 0, "max_ms": 0})
+OBS_LATENCY_WINDOWS: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+INFERENCE_QUEUE: "queue.Queue[str]" = queue.Queue()
+INFERENCE_WORKER_STARTED = False
+INFERENCE_WORKER_LOCK = threading.Lock()
+
+# Configurable triage policy rules (can be replaced per-hospital).
+POLICY_RULES: Dict[str, Any] = {
+    "red_confidence_threshold": 0.80,
+    "orange_confidence_threshold": 0.55,
+    "low_confidence_review_threshold": 0.35,
+    "consensus_trigger_confidence": 0.70,
+    "high_risk_symptoms": ["hemoptysis", "night sweats", "weight loss", "respiratory distress", "chest pain"],
+    "vital_overrides": {
+        "spo2_below": 92,
+        "resp_above": 28,
+        "hr_above": 120,
+        "temp_above": 38.5,
+    },
+}
+
 try:
     import psutil  # type: ignore
 except Exception:
@@ -114,6 +150,8 @@ async def activity_middleware(request: Request, call_next):
     client_host = request.client.host if request.client else "unknown"
     now = datetime.utcnow()
     REQUEST_ACTIVITY[client_host] = now
+    path_key = f"{request.method} {request.url.path}"
+    t0 = time.perf_counter()
 
     # Prune stale activity entries to keep active users meaningful.
     cutoff = now - timedelta(seconds=ACTIVE_USER_WINDOW_SECONDS)
@@ -122,6 +160,14 @@ async def activity_middleware(request: Request, call_next):
         REQUEST_ACTIVITY.pop(host, None)
 
     response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    metric = ENDPOINT_METRICS[path_key]
+    metric["count"] += 1
+    metric["total_ms"] += elapsed_ms
+    metric["max_ms"] = max(metric["max_ms"], elapsed_ms)
+    if response.status_code >= 400:
+        metric["errors"] += 1
+    OBS_LATENCY_WINDOWS[path_key].append(elapsed_ms)
     return response
 
 
@@ -160,6 +206,279 @@ def _format_case_time_local(dt: Optional[datetime]) -> str:
         return dt.astimezone().strftime("%H:%M")
     except Exception:
         return dt.strftime("%H:%M")
+
+
+def _observability_log_path() -> str:
+    logs_dir = os.path.join(BASE_DIR, ".logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    return os.path.join(logs_dir, "events.jsonl")
+
+
+def _write_event(event_type: str, payload: Dict[str, Any]) -> None:
+    try:
+        event = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "eventType": event_type,
+            "payload": payload,
+        }
+        with open(_observability_log_path(), "a", encoding="utf-8") as fp:
+            fp.write(json.dumps(event, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+def _hash_image(image_path: str) -> str:
+    hasher = hashlib.sha256()
+    with open(image_path, "rb") as fp:
+        while True:
+            chunk = fp.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _extract_top_pathology(analysis: Dict[str, Any]) -> str:
+    findings = analysis.get("findings") or []
+    if findings and isinstance(findings, list):
+        return str(findings[0].get("disease") or "unknown")
+    summary = str(analysis.get("summary") or "unknown")
+    return summary[:150]
+
+
+def _confidence_bucket(conf: float) -> str:
+    if conf >= 0.90:
+        return "very_high"
+    if conf >= 0.75:
+        return "high"
+    if conf >= 0.50:
+        return "moderate"
+    if conf >= 0.30:
+        return "low"
+    return "very_low"
+
+
+def _calibrate_confidence(pathology: str, raw_conf: float) -> Dict[str, Any]:
+    pathology_key = (pathology or "").lower()
+    # Static conservative calibration priors; can be replaced with learned calibration tables.
+    if any(k in pathology_key for k in ["opacity", "pneumonia", "infiltrate"]):
+        factor, floor = 0.94, 0.03
+    elif any(k in pathology_key for k in ["effusion", "edema", "cardio"]):
+        factor, floor = 0.91, 0.04
+    elif any(k in pathology_key for k in ["nodule", "mass", "cavity", "lesion"]):
+        factor, floor = 0.89, 0.05
+    else:
+        factor, floor = 0.92, 0.02
+
+    calibrated = max(0.0, min(1.0, raw_conf * factor + floor))
+    expected_error = max(0.02, min(0.30, abs(calibrated - raw_conf) + (0.10 if raw_conf < 0.5 else 0.05)))
+
+    if expected_error <= 0.06:
+        error_bin = "tight"
+    elif expected_error <= 0.12:
+        error_bin = "moderate"
+    else:
+        error_bin = "wide"
+
+    if calibrated >= 0.80:
+        risk_band = "critical"
+    elif calibrated >= 0.55:
+        risk_band = "elevated"
+    elif calibrated >= 0.35:
+        risk_band = "watch"
+    else:
+        risk_band = "low"
+
+    return {
+        "raw": round(float(raw_conf), 4),
+        "calibrated": round(calibrated, 4),
+        "expectedError": round(expected_error, 4),
+        "errorBin": error_bin,
+        "riskBand": risk_band,
+    }
+
+
+def _estimate_uncertainty(analysis: Dict[str, Any], calibration: Dict[str, Any]) -> float:
+    raw = float(analysis.get("confidence", 0.0) or 0.0)
+    spread = abs(float(calibration.get("raw", raw)) - float(calibration.get("calibrated", raw)))
+    missing_bbox_penalty = 0.10
+    findings = analysis.get("findings") or []
+    if findings and isinstance(findings, list) and findings[0].get("bbox"):
+        missing_bbox_penalty = 0.0
+    uncertainty = max(0.0, min(1.0, (1.0 - raw) * 0.6 + spread * 1.8 + missing_bbox_penalty))
+    return round(uncertainty, 4)
+
+
+def _estimate_image_quality(image_path: str) -> Optional[float]:
+    try:
+        import cv2
+
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return None
+        focus = cv2.Laplacian(img, cv2.CV_64F).var()
+        # Normalize to [0,1] for rough quality bucket visualization.
+        return round(max(0.0, min(1.0, focus / 1000.0)), 4)
+    except Exception:
+        return None
+
+
+def _policy_reasons(case_obj: Optional[Case], patient_context: str, calibrated_conf: float, uncertainty: float) -> List[str]:
+    reasons: List[str] = []
+    context = f"{patient_context} {(case_obj.complaint if case_obj else '')}".lower()
+    for token in POLICY_RULES.get("high_risk_symptoms", []):
+        if token in context:
+            reasons.append(f"symptom_trigger:{token}")
+
+    if case_obj is not None:
+        vitals = POLICY_RULES.get("vital_overrides", {})
+        if case_obj.vital_spo2 is not None and float(case_obj.vital_spo2) < vitals.get("spo2_below", 92):
+            reasons.append("vital_override:spo2")
+        if case_obj.vital_resp is not None and int(case_obj.vital_resp) > vitals.get("resp_above", 28):
+            reasons.append("vital_override:resp")
+        if case_obj.vital_hr is not None and int(case_obj.vital_hr) > vitals.get("hr_above", 120):
+            reasons.append("vital_override:hr")
+        if case_obj.vital_temp is not None and float(case_obj.vital_temp) > vitals.get("temp_above", 38.5):
+            reasons.append("vital_override:temp")
+
+    if calibrated_conf >= float(POLICY_RULES.get("red_confidence_threshold", 0.80)):
+        reasons.append("confidence:red_threshold")
+    elif calibrated_conf >= float(POLICY_RULES.get("orange_confidence_threshold", 0.55)):
+        reasons.append("confidence:orange_threshold")
+    elif calibrated_conf <= float(POLICY_RULES.get("low_confidence_review_threshold", 0.35)):
+        reasons.append("confidence:needs_review")
+
+    if uncertainty >= 0.60:
+        reasons.append("uncertainty_fail_safe")
+
+    return reasons
+
+
+def _apply_policy_to_analysis(analysis: Dict[str, Any], case_obj: Optional[Case], patient_context: str) -> Dict[str, Any]:
+    calibrated = analysis.get("metadata", {}).get("calibration", {})
+    calibrated_conf = float(calibrated.get("calibrated", analysis.get("confidence", 0.0)) or 0.0)
+    uncertainty = float(analysis.get("metadata", {}).get("uncertainty", 0.0) or 0.0)
+    reasons = _policy_reasons(case_obj, patient_context, calibrated_conf, uncertainty)
+
+    triage_color = analysis.get("triageColor", "green")
+    priority = analysis.get("priority", "routine")
+    action = "no_change"
+
+    if "confidence:red_threshold" in reasons or any(r.startswith("vital_override") for r in reasons):
+        triage_color, priority, action = "red", "immediate", "escalate"
+    elif "confidence:orange_threshold" in reasons:
+        triage_color, priority, action = "orange", "High Priority", "review"
+    elif "confidence:needs_review" in reasons or "uncertainty_fail_safe" in reasons:
+        triage_color, priority, action = "yellow", "routine", "needs_review"
+
+    analysis["triageColor"] = triage_color
+    analysis["priority"] = priority
+    analysis.setdefault("metadata", {})["policy"] = {
+        "action": action,
+        "reasons": reasons,
+        "rulesVersion": "2026.04",
+    }
+    return analysis
+
+
+def _needs_dual_consensus(analysis: Dict[str, Any]) -> bool:
+    conf = float(analysis.get("confidence", 0.0) or 0.0)
+    policy = analysis.get("metadata", {}).get("policy", {})
+    reasons = policy.get("reasons", []) if isinstance(policy, dict) else []
+    return conf >= float(POLICY_RULES.get("consensus_trigger_confidence", 0.70)) or any(
+        str(r).startswith("symptom_trigger") or str(r).startswith("vital_override") for r in reasons
+    )
+
+
+def _merge_consensus(image_path: str, patient_context: str, base_analysis: Dict[str, Any]) -> Dict[str, Any]:
+    base_engine = str(base_analysis.get("engine") or "").lower()
+    if base_engine == "both":
+        return base_analysis
+
+    alt: Optional[Dict[str, Any]] = None
+    try:
+        if base_engine == "experiment1":
+            alt = _run_experiment2(image_path, patient_context)
+        elif base_engine == "experiment2":
+            alt = _run_experiment1(image_path, patient_context)
+    except Exception as ex:
+        base_analysis.setdefault("metadata", {})["consensus"] = {
+            "state": "alt_failed",
+            "reason": str(ex),
+        }
+        return base_analysis
+
+    if not alt:
+        return base_analysis
+
+    base_top = _extract_top_pathology(base_analysis).lower()
+    alt_top = _extract_top_pathology(alt).lower()
+    agree = base_top == alt_top and base_top != "unknown"
+    conf_gap = abs(float(base_analysis.get("confidence", 0.0) or 0.0) - float(alt.get("confidence", 0.0) or 0.0))
+    state = "agree" if agree and conf_gap < 0.2 else "disagree"
+
+    base_analysis.setdefault("metadata", {})["consensus"] = {
+        "state": state,
+        "baseEngine": base_engine,
+        "altEngine": alt.get("engine"),
+        "baseTop": base_top,
+        "altTop": alt_top,
+        "confidenceGap": round(conf_gap, 4),
+    }
+
+    if state == "disagree":
+        policy_block = base_analysis.setdefault("metadata", {}).setdefault("policy", {})
+        reasons = policy_block.setdefault("reasons", [])
+        reasons.append("consensus_disagreement")
+        policy_block["action"] = "escalate"
+        base_analysis["triageColor"] = "red"
+        base_analysis["priority"] = "immediate"
+
+    return base_analysis
+
+
+def _record_inference_ledger(
+    db: Session,
+    run_id: str,
+    case_id: Optional[str],
+    image_hash: str,
+    analysis: Dict[str, Any],
+    user_action: str,
+    image_quality: Optional[float],
+) -> None:
+    metadata = analysis.get("metadata", {})
+    calibration = metadata.get("calibration", {}) if isinstance(metadata, dict) else {}
+    policy = metadata.get("policy", {}) if isinstance(metadata, dict) else {}
+    consensus = metadata.get("consensus", {}) if isinstance(metadata, dict) else {}
+    timings = metadata.get("timingsMs", {}) if isinstance(metadata, dict) else {}
+
+    row = InferenceLedger(
+        run_id=run_id,
+        case_id=case_id,
+        model_id=str(analysis.get("engine") or active_ai_model),
+        pipeline_mode=str(active_ai_model),
+        image_hash=image_hash,
+        top_pathology=_extract_top_pathology(analysis),
+        raw_confidence=float(calibration.get("raw", analysis.get("confidence", 0.0)) or 0.0),
+        calibrated_confidence=float(calibration.get("calibrated", analysis.get("confidence", 0.0)) or 0.0),
+        confidence_bucket=_confidence_bucket(float(analysis.get("confidence", 0.0) or 0.0)),
+        risk_band=str(calibration.get("riskBand") or "low"),
+        expected_error_bin=str(calibration.get("errorBin") or "moderate"),
+        uncertainty=float(metadata.get("uncertainty", 0.0) or 0.0),
+        latency_ms=float((timings or {}).get("total", 0.0) or 0.0),
+        image_quality_score=image_quality,
+        user_action=user_action,
+        policy_action=str(policy.get("action") or "no_change"),
+        consensus_state=str(consensus.get("state") or "not_run"),
+        status=str(analysis.get("status") or "unknown"),
+        details_json=json.dumps({
+            "summary": analysis.get("summary"),
+            "metadata": metadata,
+        }),
+    )
+    db.add(row)
+    db.commit()
+
 
 
 def _active_users_count() -> int:
@@ -389,13 +708,19 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
         }
 
     disease, confidence = list(findings.items())[0]
-    disease_idx = detector.diseases.index(disease)
-
-    localize_start = time.perf_counter()
-    heatmap = localizer.get_heatmap(img_tensor, disease_idx)
-    bboxes = localizer.heatmap_to_bboxes(heatmap)
-    crops = localizer.crop_regions(image_path, bboxes)
-    localize_ms = (time.perf_counter() - localize_start) * 1000.0
+    localize_ms = 0.0
+    crops: List[Dict[str, Any]] = []
+    try:
+        disease_idx = detector.diseases.index(disease)
+        localize_start = time.perf_counter()
+        heatmap = localizer.get_heatmap(img_tensor, disease_idx)
+        bboxes = localizer.heatmap_to_bboxes(heatmap)
+        crops = localizer.crop_regions(image_path, bboxes)
+        localize_ms = (time.perf_counter() - localize_start) * 1000.0
+    except Exception as ex:
+        # Keep pipeline available even when GradCAM/localizer has device issues.
+        _write_event("localization_fallback", {"engine": "experiment1", "error": str(ex)})
+        crops = []
 
     finding_items: List[Dict[str, Any]] = []
     for crop in crops[:2]:
@@ -706,8 +1031,97 @@ def _run_active_pipeline(image_path: str, patient_context: str = "") -> Dict[str
     return _run_experiment1(image_path, patient_context)
 
 
+def _enrich_analysis(
+    image_path: str,
+    analysis: Dict[str, Any],
+    case_obj: Optional[Case],
+    patient_context: str,
+    force_consensus: bool = False,
+) -> Dict[str, Any]:
+    top_pathology = _extract_top_pathology(analysis)
+    raw_conf = float(analysis.get("confidence", 0.0) or 0.0)
+    calibration = _calibrate_confidence(top_pathology, raw_conf)
+
+    analysis.setdefault("metadata", {})["calibration"] = calibration
+    analysis.setdefault("metadata", {})["confidenceBucket"] = _confidence_bucket(raw_conf)
+    analysis.setdefault("metadata", {})["imageQuality"] = _estimate_image_quality(image_path)
+    analysis.setdefault("metadata", {})["uncertainty"] = _estimate_uncertainty(analysis, calibration)
+
+    _apply_policy_to_analysis(analysis, case_obj, patient_context)
+
+    if force_consensus or _needs_dual_consensus(analysis):
+        analysis = _merge_consensus(image_path, patient_context, analysis)
+
+    return analysis
+
+
+def _ensure_escalation(case_obj: Case, analysis: Dict[str, Any], db: Session) -> None:
+    policy = analysis.get("metadata", {}).get("policy", {})
+    action = str(policy.get("action") or "")
+    if action not in {"escalate", "needs_review"}:
+        return
+
+    existing = (
+        db.query(Escalation)
+        .filter(Escalation.patient_id == case_obj.patient_id, Escalation.is_deleted == 0)
+        .first()
+    )
+
+    reason_lines = policy.get("reasons") if isinstance(policy.get("reasons"), list) else []
+    reason = "; ".join(str(r) for r in reason_lines)[:400]
+    if not reason:
+        reason = "Policy-triggered review"
+
+    if existing is None:
+        db.add(
+            Escalation(
+                patient_id=case_obj.patient_id,
+                name=case_obj.name,
+                age=case_obj.age,
+                sex=case_obj.sex,
+                reason_for_escalation=reason,
+                priority="immediate" if action == "escalate" else "urgent",
+                ai_triage="red" if action == "escalate" else "yellow",
+                confidence=float(analysis.get("confidence", 0.0) or 0.0),
+                time_waiting="0h 0m",
+                status="awaiting",
+            )
+        )
+        db.add(
+            EscalationEvent(
+                patient_id=case_obj.patient_id,
+                event_type="auto_created",
+                old_status=None,
+                new_status="awaiting",
+                reason=reason,
+                actor="policy_engine",
+            )
+        )
+    else:
+        prev_status = existing.status
+        existing.status = "awaiting"
+        existing.reason_for_escalation = reason
+        existing.confidence = float(analysis.get("confidence", 0.0) or 0.0)
+        db.add(
+            EscalationEvent(
+                patient_id=case_obj.patient_id,
+                event_type="policy_update",
+                old_status=prev_status,
+                new_status="awaiting",
+                reason=reason,
+                actor="policy_engine",
+            )
+        )
+
+
+
 def _apply_analysis_to_case(db_case: Case, analysis: Dict[str, Any], db: Session) -> None:
-    db_case.confidence = float(analysis.get("confidence", 0.0) or 0.0)
+    calibrated = (
+        analysis.get("metadata", {})
+        .get("calibration", {})
+        .get("calibrated", analysis.get("confidence", 0.0))
+    )
+    db_case.confidence = float(calibrated or 0.0)
     db_case.triage_color = analysis.get("triageColor", "green")
     db_case.priority = analysis.get("priority", "routine")
     db_case.ai_draft_report = analysis.get("aiDraftReport")
@@ -730,6 +1144,7 @@ def _apply_analysis_to_case(db_case: Case, analysis: Dict[str, Any], db: Session
             )
         )
 
+    _ensure_escalation(db_case, analysis, db)
     db.commit()
 
 
@@ -990,7 +1405,233 @@ class RecycleBinItem(BaseModel):
     escalationCount: int
     deletedAt: Optional[str] = None
 
+
+class AnalyzeJobRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    imagePath: str
+    patientId: Optional[str] = None
+    patientContext: Optional[str] = ""
+    userAction: Optional[str] = "async_analyze"
+    forceConsensus: bool = False
+
+
+class AnalyzeJobStatus(BaseModel):
+    jobId: str
+    status: str
+    progress: int
+    attempts: int
+    maxRetries: int
+    cancelRequested: bool
+    errorMessage: Optional[str] = None
+    createdAt: str
+    startedAt: Optional[str] = None
+    finishedAt: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+class PolicyRulesPayload(BaseModel):
+    red_confidence_threshold: Optional[float] = None
+    orange_confidence_threshold: Optional[float] = None
+    low_confidence_review_threshold: Optional[float] = None
+    consensus_trigger_confidence: Optional[float] = None
+    high_risk_symptoms: Optional[List[str]] = None
+    vital_overrides: Optional[Dict[str, float]] = None
+
+
+class InferenceLedgerItem(BaseModel):
+    runId: str
+    caseId: Optional[str] = None
+    modelId: str
+    pipelineMode: str
+    imageHash: str
+    topPathology: Optional[str] = None
+    rawConfidence: float
+    calibratedConfidence: float
+    confidenceBucket: str
+    riskBand: Optional[str] = None
+    expectedErrorBin: Optional[str] = None
+    uncertainty: float
+    latencyMs: float
+    userAction: str
+    policyAction: Optional[str] = None
+    consensusState: Optional[str] = None
+    status: str
+    createdAt: str
+
 # Routes
+
+
+def _job_row_to_status(row: InferenceJob) -> AnalyzeJobStatus:
+    parsed_result: Optional[Dict[str, Any]] = None
+    if row.result_json:
+        try:
+            parsed_result = json.loads(row.result_json)
+        except Exception:
+            parsed_result = {"raw": row.result_json[:1000]}
+
+    return AnalyzeJobStatus(
+        jobId=row.job_id,
+        status=row.status,
+        progress=int(row.progress or 0),
+        attempts=int(row.attempts or 0),
+        maxRetries=int(row.max_retries or 0),
+        cancelRequested=bool(row.cancel_requested),
+        errorMessage=row.error_message,
+        createdAt=(row.created_at or datetime.utcnow()).isoformat(),
+        startedAt=row.started_at.isoformat() if row.started_at else None,
+        finishedAt=row.finished_at.isoformat() if row.finished_at else None,
+        result=parsed_result,
+    )
+
+
+def _execute_analysis_request(
+    db: Session,
+    image_path: str,
+    patient_context: str,
+    patient_id: Optional[str],
+    user_action: str,
+    force_consensus: bool = False,
+) -> Dict[str, Any]:
+    run_id = uuid.uuid4().hex
+    started = time.perf_counter()
+
+    db_case: Optional[Case] = None
+    if patient_id:
+        db_case = (
+            db.query(Case)
+            .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
+            .order_by(Case.id.desc())
+            .first()
+        )
+
+    analysis = _run_active_pipeline(image_path, patient_context)
+    analysis = _enrich_analysis(image_path, analysis, db_case, patient_context, force_consensus=force_consensus)
+    analysis.setdefault("metadata", {})["runId"] = run_id
+
+    if db_case is not None:
+        _apply_analysis_to_case(db_case, analysis, db)
+
+    image_hash = _hash_image(image_path)
+    image_quality = analysis.get("metadata", {}).get("imageQuality")
+    _record_inference_ledger(
+        db,
+        run_id=run_id,
+        case_id=patient_id,
+        image_hash=image_hash,
+        analysis=analysis,
+        user_action=user_action,
+        image_quality=image_quality if isinstance(image_quality, (int, float)) else None,
+    )
+
+    total_ms = round((time.perf_counter() - started) * 1000.0, 1)
+    analysis.setdefault("metadata", {})["requestLatencyMs"] = total_ms
+    _write_event(
+        "analysis_completed",
+        {
+            "runId": run_id,
+            "caseId": patient_id,
+            "engine": analysis.get("engine"),
+            "status": analysis.get("status"),
+            "latencyMs": total_ms,
+        },
+    )
+
+    return analysis
+
+
+def _inference_worker_loop() -> None:
+    while True:
+        job_id = INFERENCE_QUEUE.get()
+        db = SessionLocal()
+        try:
+            job = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
+            if job is None:
+                INFERENCE_QUEUE.task_done()
+                db.close()
+                continue
+
+            if job.cancel_requested:
+                job.status = "cancelled"
+                job.progress = 100
+                job.finished_at = datetime.utcnow()
+                db.commit()
+                INFERENCE_QUEUE.task_done()
+                db.close()
+                continue
+
+            job.status = "running"
+            job.progress = 10
+            job.attempts = int(job.attempts or 0) + 1
+            job.started_at = datetime.utcnow()
+            db.commit()
+
+            try:
+                patient_context = ""
+                user_action = "async_analyze"
+                if job.result_json:
+                    try:
+                        payload = json.loads(job.result_json)
+                        patient_context = str(payload.get("patientContext") or "")
+                        user_action = str(payload.get("userAction") or user_action)
+                        force_consensus = bool(payload.get("forceConsensus", False))
+                    except Exception:
+                        force_consensus = False
+                else:
+                    force_consensus = False
+
+                if job.cancel_requested:
+                    job.status = "cancelled"
+                    job.progress = 100
+                    job.finished_at = datetime.utcnow()
+                    db.commit()
+                    INFERENCE_QUEUE.task_done()
+                    db.close()
+                    continue
+
+                result = _execute_analysis_request(
+                    db,
+                    image_path=job.image_path,
+                    patient_context=patient_context,
+                    patient_id=job.case_id,
+                    user_action=user_action,
+                    force_consensus=force_consensus,
+                )
+
+                job.status = "completed"
+                job.progress = 100
+                job.finished_at = datetime.utcnow()
+                job.result_json = json.dumps(result)
+                db.commit()
+            except Exception as ex:
+                retryable = int(job.attempts or 0) <= int(job.max_retries or 0)
+                job.error_message = str(ex)
+                if retryable and not job.cancel_requested:
+                    job.status = "retrying"
+                    job.progress = 0
+                    db.commit()
+                    INFERENCE_QUEUE.put(job.job_id)
+                else:
+                    job.status = "failed"
+                    job.progress = 100
+                    job.finished_at = datetime.utcnow()
+                    db.commit()
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+            INFERENCE_QUEUE.task_done()
+
+
+def _ensure_inference_worker() -> None:
+    global INFERENCE_WORKER_STARTED
+    with INFERENCE_WORKER_LOCK:
+        if INFERENCE_WORKER_STARTED:
+            return
+        worker = threading.Thread(target=_inference_worker_loop, daemon=True)
+        worker.start()
+        INFERENCE_WORKER_STARTED = True
+
 
 @app.get("/api/v1/cases", response_model=List[CaseFrontendSchema])
 def get_cases(history: Optional[bool] = False, status: Optional[str] = None, triage: Optional[str] = None, db: Session = Depends(get_db)):
@@ -1057,6 +1698,13 @@ def get_system_status(db: Session = Depends(get_db)):
         Case.ai_status.in_(["ready", "analyzing"]),
     ).count()
 
+    async_job_counts: Dict[str, int] = {}
+    for status_name in ["queued", "running", "retrying", "failed", "completed", "cancelled"]:
+        async_job_counts[status_name] = db.query(InferenceJob).filter(InferenceJob.status == status_name).count()
+
+    retry_count = db.query(InferenceJob).filter(InferenceJob.status == "retrying").count()
+    failed_jobs = db.query(InferenceJob).filter(InferenceJob.status == "failed").count()
+
     # Rough queue time estimate based on current pipeline mode.
     seconds_per_case = 20 if active_ai_model == "experiment2" else 45
     eta_seconds = queue_length * seconds_per_case
@@ -1082,6 +1730,14 @@ def get_system_status(db: Session = Depends(get_db)):
         "estimated_wait_time": eta_text,
         "recent_errors": RECENT_ERROR_COUNT,
         "pipeline_stream": _pipeline_stream_snapshot(db),
+        "model_warm_state": {
+            "exp1_detector": _exp1_detector is not None,
+            "exp1_analyzer": _exp1_analyzer is not None,
+            "exp2_preprocessor": _exp2_preprocessor is not None,
+        },
+        "queue_stage_depth": async_job_counts,
+        "retry_count": retry_count,
+        "failed_jobs": failed_jobs,
     }
 
 @app.get("/api/v1/system/model")
@@ -1106,6 +1762,228 @@ def set_active_model(data: Dict[str, str]):
     active_ai_model = new_model
     _persist_active_model(active_ai_model)
     return {"status": "success", "activeModel": active_ai_model, "modelId": active_ai_model}
+
+
+@app.get("/api/v1/policy/rules")
+def get_policy_rules():
+    return POLICY_RULES
+
+
+@app.post("/api/v1/policy/rules")
+def update_policy_rules(payload: PolicyRulesPayload):
+    updates = payload.model_dump(exclude_none=True)
+    for key, value in updates.items():
+        POLICY_RULES[key] = value
+    return {"status": "updated", "rules": POLICY_RULES}
+
+
+@app.post("/api/v1/analyze/jobs", response_model=AnalyzeJobStatus)
+def create_analyze_job(payload: AnalyzeJobRequest, db: Session = Depends(get_db)):
+    image_path = _resolve_image_path(payload.imagePath)
+    if not image_path or not os.path.exists(image_path):
+        raise HTTPException(status_code=400, detail="Valid imagePath is required")
+
+    _ensure_inference_worker()
+    job_id = uuid.uuid4().hex
+
+    row = InferenceJob(
+        job_id=job_id,
+        case_id=payload.patientId,
+        image_path=image_path,
+        pipeline_mode=active_ai_model,
+        status="queued",
+        progress=0,
+        attempts=0,
+        max_retries=2,
+        cancel_requested=0,
+        result_json=json.dumps(
+            {
+                "patientContext": payload.patientContext or "",
+                "userAction": payload.userAction or "async_analyze",
+                "forceConsensus": payload.forceConsensus,
+            }
+        ),
+    )
+    db.add(row)
+    db.commit()
+
+    INFERENCE_QUEUE.put(job_id)
+    _write_event("job_created", {"jobId": job_id, "caseId": payload.patientId, "mode": active_ai_model})
+    return _job_row_to_status(row)
+
+
+@app.get("/api/v1/analyze/jobs", response_model=List[AnalyzeJobStatus])
+def list_analyze_jobs(limit: int = 50, db: Session = Depends(get_db)):
+    rows = (
+        db.query(InferenceJob)
+        .order_by(InferenceJob.created_at.desc())
+        .limit(max(1, min(limit, 200)))
+        .all()
+    )
+    return [_job_row_to_status(row) for row in rows]
+
+
+@app.get("/api/v1/analyze/jobs/{job_id}", response_model=AnalyzeJobStatus)
+def get_analyze_job(job_id: str, db: Session = Depends(get_db)):
+    row = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_row_to_status(row)
+
+
+@app.post("/api/v1/analyze/jobs/{job_id}/cancel", response_model=AnalyzeJobStatus)
+def cancel_analyze_job(job_id: str, db: Session = Depends(get_db)):
+    row = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row.status in {"completed", "failed", "cancelled"}:
+        return _job_row_to_status(row)
+
+    row.cancel_requested = 1
+    if row.status in {"queued", "retrying"}:
+        row.status = "cancelled"
+        row.progress = 100
+        row.finished_at = datetime.utcnow()
+    db.commit()
+    _write_event("job_cancelled", {"jobId": job_id, "status": row.status})
+    return _job_row_to_status(row)
+
+
+@app.get("/api/v1/admin/inference-ledger", response_model=List[InferenceLedgerItem])
+def get_inference_ledger(caseId: Optional[str] = None, limit: int = 100, db: Session = Depends(get_db)):
+    query = db.query(InferenceLedger)
+    if caseId:
+        query = query.filter(InferenceLedger.case_id == caseId)
+    rows = query.order_by(InferenceLedger.created_at.desc()).limit(max(1, min(limit, 500))).all()
+
+    result: List[InferenceLedgerItem] = []
+    for row in rows:
+        result.append(
+            InferenceLedgerItem(
+                runId=row.run_id,
+                caseId=row.case_id,
+                modelId=row.model_id,
+                pipelineMode=row.pipeline_mode,
+                imageHash=row.image_hash,
+                topPathology=row.top_pathology,
+                rawConfidence=float(row.raw_confidence or 0.0),
+                calibratedConfidence=float(row.calibrated_confidence or 0.0),
+                confidenceBucket=row.confidence_bucket,
+                riskBand=row.risk_band,
+                expectedErrorBin=row.expected_error_bin,
+                uncertainty=float(row.uncertainty or 0.0),
+                latencyMs=float(row.latency_ms or 0.0),
+                userAction=row.user_action,
+                policyAction=row.policy_action,
+                consensusState=row.consensus_state,
+                status=row.status,
+                createdAt=(row.created_at or datetime.utcnow()).isoformat(),
+            )
+        )
+    return result
+
+
+@app.get("/api/v1/admin/observability")
+def get_observability(db: Session = Depends(get_db)):
+    endpoints: Dict[str, Any] = {}
+    for key, metric in ENDPOINT_METRICS.items():
+        count = int(metric["count"] or 0)
+        avg_ms = (metric["total_ms"] / count) if count > 0 else 0.0
+        window = list(OBS_LATENCY_WINDOWS.get(key, []))
+        p95 = 0.0
+        if window:
+            sorted_vals = sorted(window)
+            idx = int(0.95 * (len(sorted_vals) - 1))
+            p95 = float(sorted_vals[idx])
+        endpoints[key] = {
+            "count": count,
+            "errors": int(metric["errors"] or 0),
+            "avgMs": round(avg_ms, 2),
+            "p95Ms": round(p95, 2),
+            "maxMs": round(float(metric["max_ms"] or 0.0), 2),
+        }
+
+    queue_stage_depth = {
+        s: db.query(InferenceJob).filter(InferenceJob.status == s).count()
+        for s in ["queued", "running", "retrying", "failed", "completed", "cancelled"]
+    }
+
+    return {
+        "activePipeline": active_ai_model,
+        "modelWarmState": {
+            "exp1Detector": _exp1_detector is not None,
+            "exp1Analyzer": _exp1_analyzer is not None,
+            "exp2Preprocessor": _exp2_preprocessor is not None,
+        },
+        "queueStageDepth": queue_stage_depth,
+        "endpoints": endpoints,
+        "recentErrorCount": RECENT_ERROR_COUNT,
+    }
+
+
+@app.get("/api/v1/admin/drift")
+def get_drift_report(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    recent_cutoff = now - timedelta(days=7)
+    baseline_cutoff = now - timedelta(days=14)
+
+    recent = db.query(InferenceLedger).filter(InferenceLedger.created_at >= recent_cutoff).all()
+    baseline = db.query(InferenceLedger).filter(
+        InferenceLedger.created_at >= baseline_cutoff,
+        InferenceLedger.created_at < recent_cutoff,
+    ).all()
+
+    def pathology_dist(rows: List[InferenceLedger]) -> Dict[str, int]:
+        dist: Dict[str, int] = defaultdict(int)
+        for row in rows:
+            key = (row.top_pathology or "unknown")[:80]
+            dist[key] += 1
+        return dict(sorted(dist.items(), key=lambda kv: kv[1], reverse=True)[:10])
+
+    def avg_conf(rows: List[InferenceLedger]) -> float:
+        if not rows:
+            return 0.0
+        return round(sum(float(r.calibrated_confidence or 0.0) for r in rows) / len(rows), 4)
+
+    def low_quality_rate(rows: List[InferenceLedger]) -> float:
+        if not rows:
+            return 0.0
+        low = [r for r in rows if r.image_quality_score is not None and float(r.image_quality_score) < 0.2]
+        return round(len(low) / len(rows), 4)
+
+    return {
+        "recentWindowDays": 7,
+        "recentCount": len(recent),
+        "baselineCount": len(baseline),
+        "recentCaseMix": pathology_dist(recent),
+        "baselineCaseMix": pathology_dist(baseline),
+        "recentAvgCalibratedConfidence": avg_conf(recent),
+        "baselineAvgCalibratedConfidence": avg_conf(baseline),
+        "confidenceDrift": round(avg_conf(recent) - avg_conf(baseline), 4),
+        "recentLowQualityRate": low_quality_rate(recent),
+        "baselineLowQualityRate": low_quality_rate(baseline),
+    }
+
+
+@app.get("/api/v1/escalations/{patient_id}/timeline")
+def get_escalation_timeline(patient_id: str, db: Session = Depends(get_db)):
+    rows = (
+        db.query(EscalationEvent)
+        .filter(EscalationEvent.patient_id == patient_id)
+        .order_by(EscalationEvent.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "eventType": row.event_type,
+            "oldStatus": row.old_status,
+            "newStatus": row.new_status,
+            "reason": row.reason,
+            "actor": row.actor,
+            "timestamp": (row.created_at or datetime.utcnow()).isoformat(),
+        }
+        for row in rows
+    ]
 
 @app.get("/api/v1/cases/{patient_id}", response_model=CaseFrontendSchema)
 def get_case(patient_id: str, db: Session = Depends(get_db)):
@@ -1151,17 +2029,24 @@ def create_case(case: CaseCreateSchema, db: Session = Depends(get_db)):
     # Auto-run analysis on case creation when image exists and AI is enabled.
     resolved_path = _resolve_image_path(db_case.image_path)
     if resolved_path and os.path.exists(resolved_path) and active_ai_model != "none":
+        case_patient_id = db_case.patient_id
+        case_row_id = db_case.id
         try:
             patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
             analysis = _run_active_pipeline(resolved_path, patient_context)
             _apply_analysis_to_case(db_case, analysis, db)
             db.refresh(db_case)
         except Exception as ex:
-            print(f"Auto-analysis failed for {db_case.patient_id}: {ex}")
+            print(f"Auto-analysis failed for {case_patient_id}: {ex}")
             traceback.print_exc()
-            db_case.ai_status = "ready"
-            db_case.ai_draft_report = f"Analysis failed: {ex}"
-            db.commit()
+            db.rollback()
+
+            # The case may have been removed while analysis was running.
+            existing_case = db.query(Case).filter(Case.id == case_row_id, Case.is_deleted == 0).first()
+            if existing_case is not None:
+                existing_case.ai_status = "ready"
+                existing_case.ai_draft_report = f"Analysis failed: {ex}"
+                db.commit()
 
     # Re-fetch as the Frontend Schema to ensure proper serialization
     return get_case(db_case.patient_id, db=db)
@@ -1214,6 +2099,16 @@ def create_escalation(esc: EscalationCreateSchema, db: Session = Depends(get_db)
     
     db_esc = Escalation(**data)
     db.add(db_esc)
+    db.add(
+        EscalationEvent(
+            patient_id=db_esc.patient_id,
+            event_type="created",
+            old_status=None,
+            new_status=db_esc.status,
+            reason=db_esc.reason_for_escalation,
+            actor="api",
+        )
+    )
     db.commit()
     return get_escalations(db=db)[-1]  # roughly getting the mapped item back
 
@@ -1230,12 +2125,29 @@ def update_escalation(patient_id: str, esc: EscalationUpdateSchema, db: Session 
     db_esc = db.query(Escalation).filter(Escalation.patient_id == patient_id, Escalation.is_deleted == 0).first()
     if not db_esc:
         raise HTTPException(status_code=404, detail="Escalation not found")
+    old_status = db_esc.status
     if esc.status is not None:
         db_esc.status = esc.status
     if esc.assignedTo is not None:
         db_esc.assigned_to = esc.assignedTo
     if esc.specialistNotes is not None:
         db_esc.specialist_notes = esc.specialistNotes
+    if esc.status is not None or esc.assignedTo is not None or esc.specialistNotes is not None:
+        reason_parts: List[str] = []
+        if esc.assignedTo is not None:
+            reason_parts.append(f"assigned_to:{esc.assignedTo}")
+        if esc.specialistNotes is not None:
+            reason_parts.append("specialist_note_updated")
+        db.add(
+            EscalationEvent(
+                patient_id=patient_id,
+                event_type="updated",
+                old_status=old_status,
+                new_status=db_esc.status,
+                reason="; ".join(reason_parts) if reason_parts else None,
+                actor="api",
+            )
+        )
     db.commit()
     return {"status": "updated"}
 
@@ -1447,16 +2359,18 @@ def analyze_xray(data: Dict[Any, Any], db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Valid imagePath is required")
 
     patient_context = data.get("patient_context") or data.get("patientContext") or ""
-    analysis = _run_active_pipeline(image_path, patient_context)
-
-    # Optional persistence for existing case
     patient_id = data.get("patientId")
-    if patient_id:
-        db_case = db.query(Case).filter(Case.patient_id == patient_id).order_by(Case.id.desc()).first()
-        if db_case:
-            _apply_analysis_to_case(db_case, analysis, db)
+    user_action = str(data.get("userAction") or "manual_analyze")
+    force_consensus = bool(data.get("forceConsensus", False))
 
-    return analysis
+    return _execute_analysis_request(
+        db,
+        image_path=image_path,
+        patient_context=patient_context,
+        patient_id=patient_id,
+        user_action=user_action,
+        force_consensus=force_consensus,
+    )
 
 @app.post("/api/v1/foveal")
 def foveal_preprocess(data: Dict[Any, Any]):

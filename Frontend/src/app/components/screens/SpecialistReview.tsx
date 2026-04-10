@@ -21,6 +21,7 @@ import { Separator } from "../ui/separator";
 import { api, EscalationData, CaseData } from "../../../api";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
 export function SpecialistReview() {
   const { patientId } = useParams();
@@ -29,6 +30,8 @@ export function SpecialistReview() {
   const [specialistNotes, setSpecialistNotes] = useState("");
   const [editedReport, setEditedReport] = useState("");
   const [editMode, setEditMode] = useState(false);
+  const [decisionReason, setDecisionReason] = useState("");
+  const [historyReports, setHistoryReports] = useState<CaseData[]>([]);
 
   // Data fetching state
   const [escalation, setEscalation] = useState<EscalationData | null>(null);
@@ -57,6 +60,11 @@ export function SpecialistReview() {
         try {
           const caseResponse = await api.getCase(patientId);
           setCaseData(caseResponse);
+
+          const allHistory = await api.getCases(true);
+          const active = await api.getCases(false);
+          const merged = [...active, ...allHistory].filter((c) => c.patientId === patientId);
+          setHistoryReports(merged);
         } catch {
           // Case data not found
         }
@@ -72,8 +80,15 @@ export function SpecialistReview() {
 
   const handleApprove = async () => {
     if (!patientId) return;
+    if (!decisionReason) {
+      alert("Select a reason code before approving.");
+      return;
+    }
     try {
-      await api.updateEscalation(patientId, { status: "finalized", specialistNotes: specialistNotes || undefined });
+      await api.updateEscalation(patientId, {
+        status: "finalized",
+        specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
+      });
       alert("Report approved and finalized");
     } catch (err) {
       alert("Failed to approve report");
@@ -82,8 +97,15 @@ export function SpecialistReview() {
 
   const handleReturn = async () => {
     if (!patientId) return;
+    if (!decisionReason) {
+      alert("Select a reason code before returning case.");
+      return;
+    }
     try {
-      await api.updateEscalation(patientId, { status: "returned", specialistNotes: specialistNotes || undefined });
+      await api.updateEscalation(patientId, {
+        status: "returned",
+        specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
+      });
       alert("Case returned to clinic");
     } catch (err) {
       alert("Failed to return case");
@@ -96,6 +118,9 @@ export function SpecialistReview() {
     .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
     .filter((line) => line.length > 3)
     .slice(0, 6);
+  const previousReport = historyReports
+    .filter((r) => r.aiDraftReport && r.timeReceived !== caseData?.timeReceived)
+    .sort((a, b) => (b.timeReceived || "").localeCompare(a.timeReceived || ""))[0];
 
   if (loading) {
     return (
@@ -194,6 +219,26 @@ export function SpecialistReview() {
                     <span className="text-xs text-orange-700">Referred By</span>
                     <span className="text-sm font-medium text-orange-900">Clinical Team</span>
                   </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium">Decision Coding (Mandatory)</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <Select value={decisionReason} onValueChange={setDecisionReason}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select reason code" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="confirm_ai">Confirm AI finding</SelectItem>
+                      <SelectItem value="override_false_positive">Override false positive</SelectItem>
+                      <SelectItem value="override_false_negative">Override missed pathology</SelectItem>
+                      <SelectItem value="insufficient_quality">Insufficient image quality</SelectItem>
+                      <SelectItem value="request_additional_tests">Request additional tests</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </CardContent>
               </Card>
 
@@ -316,6 +361,22 @@ export function SpecialistReview() {
                     <p className="text-xs text-blue-800 leading-relaxed">
                       {caseData?.aiDraftReport || "AI analysis context will appear here after model processing."}
                     </p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium">Report Version Comparison</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-xs">
+                  <div className="rounded border border-slate-200 p-2 bg-slate-50">
+                    <div className="font-semibold text-slate-700 mb-1">Current Draft</div>
+                    <div className="text-slate-600 whitespace-pre-wrap">{(caseData?.aiDraftReport || "No draft").slice(0, 360)}</div>
+                  </div>
+                  <div className="rounded border border-slate-200 p-2 bg-slate-50">
+                    <div className="font-semibold text-slate-700 mb-1">Previous Version</div>
+                    <div className="text-slate-600 whitespace-pre-wrap">{(previousReport?.aiDraftReport || "No previous version available").slice(0, 360)}</div>
                   </div>
                 </CardContent>
               </Card>

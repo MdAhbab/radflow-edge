@@ -97,6 +97,65 @@ class SystemStats(Base):
     completed_cases = Column(Integer, default=0)
     total_analyzed = Column(Integer, default=0)
 
+
+class InferenceLedger(Base):
+    __tablename__ = "inference_ledger"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), unique=True, index=True)
+    case_id = Column(String(50), nullable=True, index=True)
+    model_id = Column(String(40), nullable=False)
+    pipeline_mode = Column(String(40), nullable=False)
+    image_hash = Column(String(128), nullable=False, index=True)
+    top_pathology = Column(String(150), nullable=True)
+    raw_confidence = Column(Float, default=0.0)
+    calibrated_confidence = Column(Float, default=0.0)
+    confidence_bucket = Column(String(40), nullable=False)
+    risk_band = Column(String(40), nullable=True)
+    expected_error_bin = Column(String(40), nullable=True)
+    uncertainty = Column(Float, default=0.0)
+    latency_ms = Column(Float, default=0.0)
+    image_quality_score = Column(Float, nullable=True)
+    user_action = Column(String(80), default="auto")
+    policy_action = Column(String(80), nullable=True)
+    consensus_state = Column(String(40), nullable=True)
+    status = Column(String(30), default="success")
+    details_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class InferenceJob(Base):
+    __tablename__ = "inference_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(64), unique=True, index=True)
+    case_id = Column(String(50), nullable=True, index=True)
+    image_path = Column(String(500), nullable=False)
+    pipeline_mode = Column(String(40), nullable=False)
+    status = Column(String(30), default="queued", index=True)
+    progress = Column(Integer, default=0)
+    attempts = Column(Integer, default=0)
+    max_retries = Column(Integer, default=2)
+    cancel_requested = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class EscalationEvent(Base):
+    __tablename__ = "escalation_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    patient_id = Column(String(50), index=True)
+    event_type = Column(String(40), nullable=False)
+    old_status = Column(String(30), nullable=True)
+    new_status = Column(String(30), nullable=True)
+    reason = Column(Text, nullable=True)
+    actor = Column(String(80), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 

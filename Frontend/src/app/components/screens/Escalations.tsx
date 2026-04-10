@@ -25,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "../ui/table";
-import { api, EscalationData, EscalationStats } from "../../../api";
+import { api, EscalationData, EscalationStats, EscalationTimelineEvent } from "../../../api";
 import { toast } from "sonner";
 
 
@@ -41,6 +41,8 @@ export function Escalations() {
   const [updatingPatientId, setUpdatingPatientId] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
+  const [selectedTimelinePatient, setSelectedTimelinePatient] = useState<string>("");
+  const [timelineEvents, setTimelineEvents] = useState<EscalationTimelineEvent[]>([]);
 
   const computeStatsFromCases = (items: EscalationData[]): EscalationStats => {
     const count = (status: EscalationData["status"]) => items.filter((item) => item.status === status).length;
@@ -239,6 +241,30 @@ export function Escalations() {
 
   const filteredCases = getFilteredCases();
 
+  const assignmentLoad = cases.reduce<Record<string, number>>((acc, c) => {
+    const key = c.assignedTo || "Unassigned";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  const agingLabel = (timeWaiting: string): string => {
+    const match = timeWaiting.match(/(\d+)h/);
+    const hours = match ? Number(match[1]) : 0;
+    if (hours >= 8) return "Critical Aging";
+    if (hours >= 4) return "Needs Attention";
+    return "Within SLA";
+  };
+
+  const loadTimeline = async (patientId: string) => {
+    setSelectedTimelinePatient(patientId);
+    try {
+      const events = await api.getEscalationTimeline(patientId);
+      setTimelineEvents(events);
+    } catch {
+      setTimelineEvents([]);
+    }
+  };
+
   const awaitingCount = stats?.awaiting || 0;
   const inReviewCount = stats?.inReview || 0;
   const returnedCount = stats?.returned || 0;
@@ -309,6 +335,19 @@ export function Escalations() {
           </div>
         </div>
 
+        <div className="bg-white rounded-lg border border-slate-200 p-4">
+          <div className="text-sm font-semibold text-slate-900 mb-2">Assignment Board</div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(assignmentLoad).length === 0 ? (
+              <span className="text-sm text-slate-500">No assignments yet.</span>
+            ) : (
+              Object.entries(assignmentLoad).map(([name, count]) => (
+                <Badge key={name} variant="outline" className="bg-slate-50">{name}: {count}</Badge>
+              ))
+            )}
+          </div>
+        </div>
+
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList className="w-full justify-start">
@@ -353,6 +392,7 @@ export function Escalations() {
                 <TableHead>AI Triage</TableHead>
                 <TableHead className="text-right">Confidence</TableHead>
                 <TableHead>Time Waiting</TableHead>
+                <TableHead>Aging Alert</TableHead>
                 {activeTab === "in-review" && <TableHead>Assigned To</TableHead>}
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
@@ -360,19 +400,19 @@ export function Escalations() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8">
+                  <TableCell colSpan={11} className="text-center py-8">
                     <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto" />
                   </TableCell>
                 </TableRow>
               ) : error ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8 text-red-600">
+                  <TableCell colSpan={11} className="text-center py-8 text-red-600">
                     {error}
                   </TableCell>
                 </TableRow>
               ) : filteredCases.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8 text-slate-500">
+                  <TableCell colSpan={11} className="text-center py-8 text-slate-500">
                     No cases in this category
                   </TableCell>
                 </TableRow>
@@ -405,6 +445,11 @@ export function Escalations() {
                         <Clock className="h-3.5 w-3.5 text-slate-400" />
                         {case_.timeWaiting}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={agingLabel(case_.timeWaiting) === "Critical Aging" ? "destructive" : "outline"}>
+                        {agingLabel(case_.timeWaiting)}
+                      </Badge>
                     </TableCell>
                     {activeTab === "in-review" && (
                       <TableCell className="text-sm text-slate-700">
@@ -445,6 +490,14 @@ export function Escalations() {
                             Open Review
                           </Button>
                         </Link>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={() => loadTimeline(case_.patientId)}
+                        >
+                          Timeline
+                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -453,6 +506,25 @@ export function Escalations() {
             </TableBody>
           </Table>
         </div>
+
+        {selectedTimelinePatient && (
+          <div className="bg-white rounded-lg border border-slate-200 mt-4 p-4">
+            <div className="text-sm font-semibold text-slate-900 mb-2">Escalation Timeline: {selectedTimelinePatient}</div>
+            <div className="space-y-2 max-h-48 overflow-auto">
+              {timelineEvents.length === 0 ? (
+                <div className="text-sm text-slate-500">No timeline events found.</div>
+              ) : (
+                timelineEvents.map((ev, idx) => (
+                  <div key={`${ev.timestamp}-${idx}`} className="text-xs border rounded p-2 bg-slate-50">
+                    <div className="font-medium text-slate-800">{ev.eventType} ({ev.oldStatus || "-"} -&gt; {ev.newStatus || "-"})</div>
+                    <div className="text-slate-600">{new Date(ev.timestamp).toLocaleString()}</div>
+                    {ev.reason && <div className="text-slate-700 mt-1">{ev.reason}</div>}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Priority Alert - Only show if immediate cases exist */}
         {activeTab === "awaiting" && filteredCases.some(c => c.priority === "immediate") && (

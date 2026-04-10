@@ -139,6 +139,24 @@ export function EHR() {
   const reports = selectedPatient?.reports || [];
   const selectedReport = reports[selectedReportIndex] || null;
 
+  const confidenceSeries = reports
+    .map((r) => (r.confidence <= 1 ? r.confidence * 100 : r.confidence))
+    .filter((v) => Number.isFinite(v));
+  const confidenceSparkline = (() => {
+    if (confidenceSeries.length === 0) return "-";
+    const levels = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    const max = Math.max(...confidenceSeries, 1);
+    return confidenceSeries
+      .slice(-10)
+      .map((v) => {
+        const idx = Math.max(0, Math.min(levels.length - 1, Math.round((v / max) * (levels.length - 1))));
+        return levels[idx];
+      })
+      .join("");
+  })();
+  const resolvedCount = reports.filter((r) => r.aiStatus === "complete").length;
+  const unresolvedCount = reports.length - resolvedCount;
+
   useEffect(() => {
     if (!selectedPatientId) {
       setTimeline([]);
@@ -280,6 +298,20 @@ export function EHR() {
                     <CardContent>
                       <div className="text-sm text-slate-600">
                         {selectedPatient.age} years / {selectedPatient.sex} | Total reports: {selectedPatient.reports.length}
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 mt-4">
+                        <div className="rounded-md border border-slate-200 p-3 bg-slate-50">
+                          <div className="text-xs text-slate-500">Resolved</div>
+                          <div className="text-lg font-semibold text-emerald-700">{resolvedCount}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 p-3 bg-slate-50">
+                          <div className="text-xs text-slate-500">Unresolved</div>
+                          <div className="text-lg font-semibold text-amber-700">{unresolvedCount}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 p-3 bg-slate-50">
+                          <div className="text-xs text-slate-500">Confidence Trend</div>
+                          <div className="text-lg font-mono text-slate-800">{confidenceSparkline}</div>
+                        </div>
                       </div>
                     </CardContent>
                   </Card>

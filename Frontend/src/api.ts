@@ -42,6 +42,101 @@ export interface SystemStatus {
   estimated_wait_time: string;
   recent_errors: number;
   pipeline_stream?: string[];
+  model_warm_state?: {
+    exp1_detector: boolean;
+    exp1_analyzer: boolean;
+    exp2_preprocessor: boolean;
+  };
+  queue_stage_depth?: Record<string, number>;
+  retry_count?: number;
+  failed_jobs?: number;
+}
+
+export interface AnalyzeJobRequest {
+  imagePath: string;
+  patientId?: string;
+  patientContext?: string;
+  userAction?: string;
+  forceConsensus?: boolean;
+}
+
+export interface AnalyzeJobStatus {
+  jobId: string;
+  status: string;
+  progress: number;
+  attempts: number;
+  maxRetries: number;
+  cancelRequested: boolean;
+  errorMessage?: string;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  result?: Record<string, unknown>;
+}
+
+export interface InferenceLedgerItem {
+  runId: string;
+  caseId?: string;
+  modelId: string;
+  pipelineMode: string;
+  imageHash: string;
+  topPathology?: string;
+  rawConfidence: number;
+  calibratedConfidence: number;
+  confidenceBucket: string;
+  riskBand?: string;
+  expectedErrorBin?: string;
+  uncertainty: number;
+  latencyMs: number;
+  userAction: string;
+  policyAction?: string;
+  consensusState?: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface ObservabilitySnapshot {
+  activePipeline: string;
+  modelWarmState: {
+    exp1Detector: boolean;
+    exp1Analyzer: boolean;
+    exp2Preprocessor: boolean;
+  };
+  queueStageDepth: Record<string, number>;
+  endpoints: Record<string, { count: number; errors: number; avgMs: number; p95Ms: number; maxMs: number }>;
+  recentErrorCount: number;
+}
+
+export interface DriftReport {
+  recentWindowDays: number;
+  recentCount: number;
+  baselineCount: number;
+  recentCaseMix: Record<string, number>;
+  baselineCaseMix: Record<string, number>;
+  recentAvgCalibratedConfidence: number;
+  baselineAvgCalibratedConfidence: number;
+  confidenceDrift: number;
+  recentLowQualityRate: number;
+  baselineLowQualityRate: number;
+}
+
+export interface EscalationTimelineEvent {
+  eventType: string;
+  oldStatus?: string;
+  newStatus?: string;
+  reason?: string;
+  actor?: string;
+  timestamp: string;
+}
+
+export interface OfflineQueueItem {
+  id: string;
+  route: string;
+  method: "POST" | "PUT" | "DELETE";
+  payload: unknown;
+  createdAt: string;
+  retryCount: number;
+  lastError?: string;
 }
 
 export interface EscalationData {
@@ -132,6 +227,35 @@ export interface ChatResponse {
 }
 
 const API_BASE = "http://localhost:8000/api/v1";
+const OFFLINE_QUEUE_KEY = "hsil_offline_sync_queue";
+
+const readOfflineQueue = (): OfflineQueueItem[] => {
+  try {
+    const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeOfflineQueue = (items: OfflineQueueItem[]) => {
+  localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(items));
+};
+
+const enqueueOfflineMutation = (item: Omit<OfflineQueueItem, "id" | "createdAt" | "retryCount">): OfflineQueueItem => {
+  const nextItem: OfflineQueueItem = {
+    ...item,
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    createdAt: new Date().toISOString(),
+    retryCount: 0,
+  };
+  const queue = readOfflineQueue();
+  queue.push(nextItem);
+  writeOfflineQueue(queue);
+  return nextItem;
+};
 
 export const api = {
   async getCases(history: boolean = false): Promise<CaseData[]> {
@@ -159,13 +283,22 @@ export const api = {
   },
 
   async updateCase(patientId: string, data: Partial<CaseData>): Promise<{status: string}> {
-    const res = await fetch(`${API_BASE}/cases/${patientId}`, {
-      method: "PUT",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(data)
-    });
-    if (!res.ok) throw new Error("Failed to update case");
-    return res.json();
+    try {
+      const res = await fetch(`${API_BASE}/cases/${patientId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      if (!res.ok) throw new Error("Failed to update case");
+      return res.json();
+    } catch (err) {
+      enqueueOfflineMutation({
+        route: `/cases/${patientId}`,
+        method: "PUT",
+        payload: data,
+      });
+      return { status: "queued-offline" };
+    }
   },
 
   async getEscalations(status?: EscalationData["status"]): Promise<EscalationData[]> {
@@ -176,13 +309,25 @@ export const api = {
   },
 
   async createEscalation(data: EscalationData): Promise<EscalationData> {
-    const res = await fetch(`${API_BASE}/escalations`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(data)
-    });
-    if (!res.ok) throw new Error("Failed to create escalation");
-    return res.json();
+    try {
+      const res = await fetch(`${API_BASE}/escalations`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      if (!res.ok) throw new Error("Failed to create escalation");
+      return res.json();
+    } catch {
+      enqueueOfflineMutation({
+        route: "/escalations",
+        method: "POST",
+        payload: data,
+      });
+      return {
+        ...data,
+        status: data.status || "awaiting",
+      };
+    }
   },
   
   async getEscalationStats(): Promise<EscalationStats> {
@@ -192,13 +337,22 @@ export const api = {
   },
 
   async updateEscalation(patientId: string, data: Partial<EscalationData>): Promise<{status: string}> {
-    const res = await fetch(`${API_BASE}/escalations/${patientId}`, {
-      method: "PUT",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(data)
-    });
-    if (!res.ok) throw new Error("Failed to update escalation");
-    return res.json();
+    try {
+      const res = await fetch(`${API_BASE}/escalations/${patientId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      if (!res.ok) throw new Error("Failed to update escalation");
+      return res.json();
+    } catch {
+      enqueueOfflineMutation({
+        route: `/escalations/${patientId}`,
+        method: "PUT",
+        payload: data,
+      });
+      return { status: "queued-offline" };
+    }
   },
 
   async getSystemStatus(): Promise<SystemStatus> {
@@ -249,20 +403,45 @@ export const api = {
   },
 
   async createCase(data: Partial<CaseData>): Promise<CaseData> {
-    const res = await fetch(`${API_BASE}/cases`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        ...data,
-        patient_id: data.patientId || `PT-NEW-${Math.floor(Math.random() * 1000)}`,
-        name: data.name || "Unknown Patient",
-        age: data.age || 0,
-        sex: data.sex || "Unknown",
-        complaint: data.complaint || "None provided"
-      })
-    });
-    if (!res.ok) throw new Error("Failed to create case");
-    return res.json();
+    const payload = {
+      ...data,
+      patient_id: data.patientId || `PT-NEW-${Math.floor(Math.random() * 1000)}`,
+      name: data.name || "Unknown Patient",
+      age: data.age || 0,
+      sex: data.sex || "Unknown",
+      complaint: data.complaint || "None provided"
+    };
+
+    try {
+      const res = await fetch(`${API_BASE}/cases`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error("Failed to create case");
+      return res.json();
+    } catch {
+      const queued = enqueueOfflineMutation({
+        route: "/cases",
+        method: "POST",
+        payload,
+      });
+      return {
+        patientId: String(payload.patient_id),
+        name: String(payload.name),
+        age: Number(payload.age),
+        sex: String(payload.sex),
+        complaint: String(payload.complaint),
+        studyType: String(data.studyType || "Chest X-Ray (PA)"),
+        timeReceived: new Date().toLocaleTimeString(),
+        aiStatus: "ready",
+        triageColor: "yellow",
+        confidence: 0,
+        priority: "queued-offline",
+        imagePath: data.imagePath,
+        aiDraftReport: `Queued for offline sync (${queued.id})`,
+      };
+    }
   },
 
   async uploadFile(file: File): Promise<string> {
@@ -310,5 +489,111 @@ export const api = {
     const res = await fetch(`${API_BASE}/admin/recycle-bin/${patientId}/restore`, { method: "POST" });
     if (!res.ok) throw new Error("Failed to restore patient history");
     return res.json();
+  },
+
+  async createAnalyzeJob(payload: AnalyzeJobRequest): Promise<AnalyzeJobStatus> {
+    const res = await fetch(`${API_BASE}/analyze/jobs`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Failed to create analyze job");
+    return res.json();
+  },
+
+  async getAnalyzeJob(jobId: string): Promise<AnalyzeJobStatus> {
+    const res = await fetch(`${API_BASE}/analyze/jobs/${jobId}`);
+    if (!res.ok) throw new Error("Failed to fetch analyze job");
+    return res.json();
+  },
+
+  async listAnalyzeJobs(limit: number = 50): Promise<AnalyzeJobStatus[]> {
+    const res = await fetch(`${API_BASE}/analyze/jobs?limit=${encodeURIComponent(String(limit))}`);
+    if (!res.ok) throw new Error("Failed to list analyze jobs");
+    return res.json();
+  },
+
+  async cancelAnalyzeJob(jobId: string): Promise<AnalyzeJobStatus> {
+    const res = await fetch(`${API_BASE}/analyze/jobs/${jobId}/cancel`, { method: "POST" });
+    if (!res.ok) throw new Error("Failed to cancel analyze job");
+    return res.json();
+  },
+
+  async getInferenceLedger(caseId?: string, limit: number = 100): Promise<InferenceLedgerItem[]> {
+    const params = new URLSearchParams();
+    if (caseId) params.set("caseId", caseId);
+    params.set("limit", String(limit));
+    const res = await fetch(`${API_BASE}/admin/inference-ledger?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch inference ledger");
+    return res.json();
+  },
+
+  async getObservability(): Promise<ObservabilitySnapshot> {
+    const res = await fetch(`${API_BASE}/admin/observability`);
+    if (!res.ok) throw new Error("Failed to fetch observability snapshot");
+    return res.json();
+  },
+
+  async getDriftReport(): Promise<DriftReport> {
+    const res = await fetch(`${API_BASE}/admin/drift`);
+    if (!res.ok) throw new Error("Failed to fetch drift report");
+    return res.json();
+  },
+
+  async getPolicyRules(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${API_BASE}/policy/rules`);
+    if (!res.ok) throw new Error("Failed to fetch policy rules");
+    return res.json();
+  },
+
+  async updatePolicyRules(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const res = await fetch(`${API_BASE}/policy/rules`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Failed to update policy rules");
+    return res.json();
+  },
+
+  async getEscalationTimeline(patientId: string): Promise<EscalationTimelineEvent[]> {
+    const res = await fetch(`${API_BASE}/escalations/${patientId}/timeline`);
+    if (!res.ok) throw new Error("Failed to fetch escalation timeline");
+    return res.json();
+  },
+
+  getOfflineQueue(): OfflineQueueItem[] {
+    return readOfflineQueue();
+  },
+
+  async replayOfflineQueue(): Promise<{ replayed: number; failed: number; remaining: number }> {
+    const queue = readOfflineQueue();
+    const remaining: OfflineQueueItem[] = [];
+    let replayed = 0;
+    let failed = 0;
+
+    for (const item of queue) {
+      try {
+        const res = await fetch(`${API_BASE}${item.route}`, {
+          method: item.method,
+          headers: {"Content-Type": "application/json"},
+          body: item.method === "DELETE" ? undefined : JSON.stringify(item.payload),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        replayed += 1;
+      } catch (err) {
+        failed += 1;
+        remaining.push({
+          ...item,
+          retryCount: item.retryCount + 1,
+          lastError: err instanceof Error ? err.message : "unknown",
+        });
+      }
+    }
+
+    writeOfflineQueue(remaining);
+    return { replayed, failed, remaining: remaining.length };
   }
 };
