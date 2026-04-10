@@ -12,6 +12,7 @@ import time
 import threading
 import queue
 from pathlib import Path
+from importlib import metadata
 
 # Terminal colors for better visibility
 class Colors:
@@ -46,29 +47,79 @@ def print_error(message):
 processes = []
 log_queue = queue.Queue()
 
-def kill_port(port):
-    """Effectively clears any process blocking a specific port (Windows)"""
-    if sys.platform != "win32":
+
+def get_venv_python() -> Path:
+    project_root = Path(__file__).parent
+    if sys.platform == "win32":
+        return project_root / ".venv" / "Scripts" / "python.exe"
+    return project_root / ".venv" / "bin" / "python"
+
+
+def ensure_venv_python():
+    """Relaunch with project venv interpreter when available."""
+    venv_python = get_venv_python()
+    if not venv_python.exists():
         return
-    
+
+    # Detect whether we're already running inside this project's virtualenv.
+    venv_root = venv_python.parent.parent.resolve()
+    current_prefix = Path(sys.prefix).resolve()
+    if current_prefix == venv_root:
+        return
+
+    print_info(f"Switching to project virtualenv Python: {venv_python}")
+    # Important: execute the venv path directly; resolving it can jump to the
+    # base interpreter and lose virtualenv site-packages.
+    os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+def kill_port(port):
+    """Clear any process blocking a specific port on all supported platforms."""
+    if sys.platform == "win32":
+        try:
+            cmd = f'netstat -ano | findstr LISTENING | findstr :{port}'
+            output = subprocess.check_output(cmd, shell=True).decode()
+            pids = set()
+            for line in output.strip().split('\n'):
+                parts = line.strip().split()
+                if len(parts) > 4:
+                    pid = parts[-1]
+                    if pid.isdigit() and pid != '0':
+                        pids.add(pid)
+
+            for pid in pids:
+                print_info(f"Purging existing process {pid} on port {port}...")
+                subprocess.run(['taskkill', '/F', '/T', '/PID', pid], capture_output=True)
+                time.sleep(0.5)
+        except Exception:
+            pass
+        return
+
     try:
-        # Use netstat to find PIDs using the port
-        cmd = f'netstat -ano | findstr LISTENING | findstr :{port}'
-        output = subprocess.check_output(cmd, shell=True).decode()
-        pids = set()
-        for line in output.strip().split('\n'):
-            parts = line.strip().split()
-            if len(parts) > 4:
-                pid = parts[-1]
-                if pid.isdigit() and pid != '0':
-                    pids.add(pid)
-        
+        result = subprocess.run(
+            ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return
+
+        pids = [pid.strip() for pid in result.stdout.splitlines() if pid.strip().isdigit()]
         for pid in pids:
             print_info(f"Purging existing process {pid} on port {port}...")
-            # /F = Force, /T = Kill process tree (child processes like uvicorn)
-            subprocess.run(['taskkill', '/F', '/T', '/PID', pid], capture_output=True)
-            time.sleep(0.5) # Wait for OS to release the socket
-    except:
+            subprocess.run(["kill", "-TERM", pid], capture_output=True)
+
+        time.sleep(0.5)
+
+        result_after = subprocess.run(
+            ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+        )
+        if result_after.returncode == 0:
+            stale_pids = [pid.strip() for pid in result_after.stdout.splitlines() if pid.strip().isdigit()]
+            for pid in stale_pids:
+                subprocess.run(["kill", "-KILL", pid], capture_output=True)
+    except Exception:
         pass
 
 def reader_thread(name, stream, q):
@@ -117,23 +168,22 @@ def check_dependencies():
 
     # Check pip packages
     required_packages = ['fastapi', 'uvicorn', 'sqlalchemy']
-    try:
-        import pkg_resources
-        for package in required_packages:
-            try:
-                version = pkg_resources.get_distribution(package).version
-                print_success(f"{package}: {version}")
-            except pkg_resources.DistributionNotFound:
-                print_error(f"{package} not found")
-                print_warning(f"Install with: pip install {package}")
-                return False
-    except ImportError:
-        print_warning("Unable to check packages, proceeding anyway...")
+    for package in required_packages:
+        try:
+            version = metadata.version(package)
+            print_success(f"{package}: {version}")
+        except metadata.PackageNotFoundError:
+            print_error(f"{package} not found")
+            print_warning("Run with project venv: source .venv/bin/activate && python run_all.py")
+            return False
+        except Exception:
+            print_warning("Unable to fully validate Python packages, proceeding anyway...")
+            break
 
     # Check Node.js
     node_command = 'node.exe' if sys.platform == "win32" else 'node'
     try:
-        result = subprocess.run([node_command, '--version'], capture_output=True, text=True, shell=True)
+        result = subprocess.run([node_command, '--version'], capture_output=True, text=True)
         if result.returncode == 0:
             print_success(f"Node.js: {result.stdout.strip()}")
         else:
@@ -146,7 +196,7 @@ def check_dependencies():
     # Check npm (use npm.cmd on Windows)
     npm_command = 'npm.cmd' if sys.platform == "win32" else 'npm'
     try:
-        result = subprocess.run([npm_command, '--version'], capture_output=True, text=True, shell=True)
+        result = subprocess.run([npm_command, '--version'], capture_output=True, text=True)
         if result.returncode == 0:
             print_success(f"npm: {result.stdout.strip()}")
         else:
@@ -222,7 +272,6 @@ def start_frontend():
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            shell=True,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         )
 
@@ -287,6 +336,8 @@ def monitor_processes():
 
 def main():
     """Main entry point"""
+    ensure_venv_python()
+
     # Set up signal handlers
     signal.signal(signal.SIGINT, cleanup)
     if sys.platform != "win32":

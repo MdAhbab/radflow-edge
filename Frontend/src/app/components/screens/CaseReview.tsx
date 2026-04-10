@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { 
   ArrowLeft,
@@ -23,7 +23,8 @@ import { Separator } from "../ui/separator";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
-import { api, CaseData } from "../../../api";
+import { api, CaseData, FindingData } from "../../../api";
+import { toast } from "sonner";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -31,6 +32,8 @@ interface ChatMessage {
 }
 
 export function CaseReview() {
+  const IMAGE_FRAME_WIDTH = 500;
+  const IMAGE_FRAME_HEIGHT = 600;
   const { patientId } = useParams();
   const navigate = useNavigate();
   const [caseData, setCaseData] = useState<CaseData | null>(null);
@@ -39,18 +42,38 @@ export function CaseReview() {
   const [actionLoading, setActionLoading] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [showAnnotations, setShowAnnotations] = useState(true);
+  const [findings, setFindings] = useState<FindingData[]>([]);
+  const [findingsLoading, setFindingsLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(true);
   const [genexpertOrdered, setGenexpertOrdered] = useState(false);
+  const pendingPatchRef = useRef<Partial<CaseData>>({});
+  const saveTimerRef = useRef<number | null>(null);
+  const [autosaveState, setAutosaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [imageLayout, setImageLayout] = useState({
+    naturalW: IMAGE_FRAME_WIDTH,
+    naturalH: IMAGE_FRAME_HEIGHT,
+    displayW: IMAGE_FRAME_WIDTH,
+    displayH: IMAGE_FRAME_HEIGHT,
+    offsetX: 0,
+    offsetY: 0,
+  });
 
   useEffect(() => {
     if (!patientId) return;
+    localStorage.setItem("hsil_last_viewed_case", patientId);
     const fetchCase = async () => {
       setLoading(true);
       try {
-        const data = await api.getCase(patientId);
+        const [data, findingsData] = await Promise.all([
+          api.getCase(patientId),
+          api.getFindings(patientId),
+        ]);
         setCaseData(data);
+        const sorted = [...findingsData].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+        setFindings(sorted);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load case");
       } finally {
@@ -60,42 +83,128 @@ export function CaseReview() {
     fetchCase();
   }, [patientId]);
 
-  const handlePromptChip = (prompt: string) => {
-    setChatMessages([...chatMessages, { role: "user", content: prompt }]);
-    
-    // Simulate AI response
-    setTimeout(() => {
-      let response = "";
-      if (prompt.includes("main finding")) {
-        response = "The main finding is a **cavitary lesion in the right upper lobe** measuring approximately 3.2 cm in diameter with irregular thick walls. This is surrounded by bilateral upper lobe nodular and reticulonodular opacities, more prominent on the right side. These findings are highly suspicious for active pulmonary tuberculosis.";
-      } else if (prompt.includes("abnormal region")) {
-        response = "I've highlighted the key abnormal regions on the X-ray. The red overlay indicates the cavitary lesion in the right upper lobe. The orange areas show the surrounding nodular opacities and infiltrates. These regions show increased opacity compared to normal lung tissue.";
-      } else if (prompt.includes("TB")) {
-        response = "Yes, the imaging findings are **highly suspicious for active pulmonary tuberculosis**. Key indicators include:\n\n• Cavitary lesion with thick irregular walls (classic for TB)\n• Upper lobe predominance (typical TB distribution)\n• Bilateral nodular opacities\n• Patient's symptoms (persistent cough, night sweats, weight loss)\n\nHowever, the confidence is 87% rather than higher because silicosis can present similarly. The patient's occupational history is not noted, but differential diagnosis includes chronic silicosis with superimposed TB.";
-      } else if (prompt.includes("should I do")) {
-        response = "**Immediate Actions Recommended:**\n\n1. **Isolate patient** - Implement airborne precautions immediately\n2. **Order GeneXpert MTB/RIF** - Rapid molecular testing for TB confirmation\n3. **Collect 3 sputum samples** - For smear microscopy and culture\n4. **Start contact tracing** - Identify household and close contacts\n5. **Consider HIV testing** - If status unknown\n\n**Clinical Assessment:**\n• Assess respiratory status and oxygen saturation\n• Check for signs of severe disease\n• Review previous TB treatment history\n\nGiven the high suspicion, do not delay isolation or diagnostic workup.";
-      } else if (prompt.includes("low confidence")) {
-        response = "The confidence is 87%, which is actually quite high, but not at the maximum level because:\n\n1. **Differential diagnosis exists**: Silicosis with cavitation can appear very similar to TB\n2. **Limited clinical context**: The AI doesn't have full occupational history or previous imaging\n3. **Some atypical features**: The cavity size and wall thickness could also suggest fungal infection or necrotizing pneumonia\n\nHowever, given the clinical presentation (persistent cough, night sweats, weight loss for 3 months), the probability of active TB is very high. The recommendation to proceed with TB workup remains strong.";
+  useEffect(() => {
+    if (!patientId || !caseData) return;
+    let mounted = true;
+
+    const refreshFindings = async () => {
+      setFindingsLoading(true);
+      try {
+        const data = await api.getFindings(patientId);
+        if (!mounted) return;
+        const sorted = [...data].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+        setFindings(sorted);
+      } catch {
+        if (mounted) setFindings([]);
+      } finally {
+        if (mounted) setFindingsLoading(false);
       }
-      
-      setChatMessages(prev => [...prev, { role: "assistant", content: response }]);
-    }, 800);
+    };
+
+    refreshFindings();
+    const timer = setInterval(refreshFindings, 10000);
+    return () => {
+      mounted = false;
+      clearInterval(timer);
+    };
+  }, [patientId, caseData]);
+
+  const fmtConfidence = (value?: number | null): number => {
+    if (!value) return 0;
+    return Math.round(value * (value <= 1 ? 100 : 1));
   };
 
-  const handleSendMessage = () => {
-    if (!chatInput.trim()) return;
-    
-    setChatMessages([...chatMessages, { role: "user", content: chatInput }]);
-    setChatInput("");
-    
-    // Simulate AI response
-    setTimeout(() => {
-      setChatMessages(prev => [...prev, { 
-        role: "assistant", 
-        content: "I can help you understand this case better. Could you clarify what specific aspect you'd like me to explain?" 
-      }]);
-    }, 800);
+  const topFinding = findings.length > 0 ? findings[0] : null;
+  const caseConfidenceRaw = caseData?.confidence || 0;
+  const liveConfidence = topFinding
+    ? fmtConfidence(topFinding.confidence)
+    : Math.round(caseConfidenceRaw * (caseConfidenceRaw <= 1 ? 100 : 1));
+  const hasLiveFindings = findings.length > 0;
+  const priorityText = (caseData?.priority || "").toLowerCase();
+  const triageColor = (caseData?.triageColor || "").toLowerCase();
+  const hasAiOutput =
+    (caseData?.aiStatus === "complete" || caseData?.aiStatus === "escalated") ||
+    hasLiveFindings ||
+    caseConfidenceRaw > 0;
+  const highPriorityByFlags =
+    caseData?.aiStatus === "escalated" ||
+    ["urgent", "immediate", "high priority"].includes(priorityText) ||
+    ["red", "orange"].includes(triageColor);
+  const showHighPriorityAlert = hasAiOutput && (highPriorityByFlags || liveConfidence >= 50);
+
+  const parseRecommendedSteps = (text?: string | null): string[] => {
+    if (!text) return [];
+    return text
+      .split(/\n+/)
+      .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+      .filter((line) => line.length > 8)
+      .slice(0, 5);
   };
+
+  const recommendedSteps = parseRecommendedSteps(caseData?.recommendedSteps);
+
+  const handlePromptChip = async (prompt: string) => {
+    if (!patientId) return;
+    setChatMessages((prev) => [...prev, { role: "user", content: prompt }]);
+    setChatLoading(true);
+    try {
+      const response = await api.askClinicalCopilot(patientId, prompt);
+      setChatMessages((prev) => [...prev, { role: "assistant", content: response }]);
+    } catch (err) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Unable to reach AI copilot right now. Please try again in a few moments.",
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !patientId || chatLoading) return;
+
+    const message = chatInput.trim();
+    setChatInput("");
+    setChatMessages((prev) => [...prev, { role: "user", content: message }]);
+    setChatLoading(true);
+    try {
+      const response = await api.askClinicalCopilot(patientId, message);
+      setChatMessages((prev) => [...prev, { role: "assistant", content: response }]);
+    } catch {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Unable to reach AI copilot right now. Please try again in a few moments.",
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    const naturalW = img.naturalWidth || IMAGE_FRAME_WIDTH;
+    const naturalH = img.naturalHeight || IMAGE_FRAME_HEIGHT;
+    const scale = Math.min(IMAGE_FRAME_WIDTH / naturalW, IMAGE_FRAME_HEIGHT / naturalH);
+    const displayW = naturalW * scale;
+    const displayH = naturalH * scale;
+    const offsetX = (IMAGE_FRAME_WIDTH - displayW) / 2;
+    const offsetY = (IMAGE_FRAME_HEIGHT - displayH) / 2;
+    setImageLayout({ naturalW, naturalH, displayW, displayH, offsetX, offsetY });
+  };
+
+  const annotationFindings = findings.filter(
+    (f) =>
+      f.bbox_x1 != null &&
+      f.bbox_y1 != null &&
+      f.bbox_x2 != null &&
+      f.bbox_y2 != null
+  );
 
   const handleIsolate = async () => {
     if (!caseData) return;
@@ -106,18 +215,90 @@ export function CaseReview() {
     setActionLoading(false);
   };
 
+  const queueCaseAutosave = (patch: Partial<CaseData>) => {
+    if (!caseData) return;
+
+    setCaseData((prev) => (prev ? { ...prev, ...patch } : prev));
+    pendingPatchRef.current = { ...pendingPatchRef.current, ...patch };
+    setAutosaveState("saving");
+
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = window.setTimeout(async () => {
+      const payload = pendingPatchRef.current;
+      pendingPatchRef.current = {};
+
+      try {
+        if (patientId) {
+          await api.updateCase(patientId, payload);
+        }
+        setAutosaveState("saved");
+        window.setTimeout(() => setAutosaveState("idle"), 1200);
+      } catch {
+        setAutosaveState("error");
+      }
+    }, 400);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleEscalate = async () => {
     if (!caseData) return;
     setActionLoading(true);
-    await api.updateCase(caseData.patientId, { aiStatus: "escalated" });
-    navigate("/dashboard");
+    try {
+      await api.updateCase(caseData.patientId, { aiStatus: "escalated", priority: "immediate", triageColor: "red" });
+
+      const existingEscalations = await api.getEscalations();
+      const existing = existingEscalations.find((item) => item.patientId === caseData.patientId);
+
+      if (existing) {
+        await api.updateEscalation(caseData.patientId, { status: "awaiting" });
+      } else {
+        await api.createEscalation({
+          patientId: caseData.patientId,
+          name: caseData.name,
+          age: caseData.age,
+          sex: caseData.sex,
+          reasonForEscalation: caseData.complaint || "AI flagged this case for specialist review.",
+          priority: "immediate",
+          aiTriage: (caseData.triageColor === "green" ? "yellow" : caseData.triageColor) as "red" | "orange" | "yellow",
+          confidence: caseData.confidence || 0,
+          timeWaiting: "0h 0m",
+          status: "awaiting",
+          assignedTo: undefined,
+        });
+      }
+
+      toast.success(`Case ${caseData.patientId} escalated to specialist queue.`);
+      navigate("/dashboard/escalations");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to escalate case";
+      toast.error(message);
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const handleSaveToEHR = async () => {
     if (!caseData) return;
     setActionLoading(true);
-    await api.updateCase(caseData.patientId, { aiStatus: "complete", isArchived: 1 });
-    navigate("/history");
+    try {
+      await api.updateCase(caseData.patientId, { aiStatus: "complete", isArchived: 1 });
+      toast.success(`Case ${caseData.patientId} saved to EHR records.`);
+      navigate("/dashboard/ehr");
+    } catch (err) {
+      toast.error("Failed to save to EHR.");
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   if (loading) {
@@ -188,6 +369,13 @@ export function CaseReview() {
         <div className="w-80 border-r border-slate-200 bg-white overflow-auto">
           <ScrollArea className="h-full">
             <div className="p-4 space-y-4">
+              <div className="text-xs px-3 py-2 rounded-md border border-slate-200 bg-slate-50 text-slate-600">
+                {autosaveState === "saving" && "Saving patient details..."}
+                {autosaveState === "saved" && "All patient details saved."}
+                {autosaveState === "error" && "Auto-save failed. Keep editing; retry will happen on next change."}
+                {autosaveState === "idle" && "Patient detail edits are auto-saved."}
+              </div>
+
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-sm font-medium">Demographics</CardTitle>
@@ -204,6 +392,14 @@ export function CaseReview() {
                   <div className="flex justify-between">
                     <span className="text-slate-600">Age / Sex:</span>
                     <span>{caseData.age} years / {caseData.sex}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Study Type:</span>
+                    <span>{caseData.studyType}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-600">Study Time:</span>
+                    <span>{caseData.timeReceived}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -226,29 +422,59 @@ export function CaseReview() {
                 <CardContent className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-slate-600">Temperature:</span>
-                    <span className={`font-medium ${caseData.vitalTemp && caseData.vitalTemp > 37.5 ? 'text-orange-700' : ''}`}>
-                      {caseData.vitalTemp || '--'}°C
-                    </span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      type="number"
+                      step="0.1"
+                      value={caseData.vitalTemp ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalTemp: e.target.value ? Number(e.target.value) : undefined })}
+                    />
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Heart Rate:</span>
-                    <span>{caseData.vitalHr || '--'} bpm</span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      type="number"
+                      value={caseData.vitalHr ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalHr: e.target.value ? Number(e.target.value) : undefined })}
+                    />
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">BP:</span>
-                    <span>{caseData.vitalBp || '--'} mmHg</span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      value={caseData.vitalBp ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalBp: e.target.value || undefined })}
+                    />
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Resp Rate:</span>
-                    <span className="font-medium">{caseData.vitalResp || '--'} /min</span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      type="number"
+                      value={caseData.vitalResp ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalResp: e.target.value ? Number(e.target.value) : undefined })}
+                    />
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">SpO2:</span>
-                    <span className="font-medium text-orange-700">{caseData.vitalSpo2 || '--'}% (room air)</span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      type="number"
+                      step="0.1"
+                      value={caseData.vitalSpo2 ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalSpo2: e.target.value ? Number(e.target.value) : undefined })}
+                    />
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Weight:</span>
-                    <span>{caseData.vitalWeight || '--'} kg</span>
+                    <Input
+                      className="h-7 w-28 text-right"
+                      type="number"
+                      step="0.1"
+                      value={caseData.vitalWeight ?? ""}
+                      onChange={(e) => queueCaseAutosave({ vitalWeight: e.target.value ? Number(e.target.value) : undefined })}
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -258,25 +484,12 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium">Risk Factors & History</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  <div className="pt-2 text-slate-600">
-                    {caseData.riskFactors || 'No significant risk factors available.'}
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium">Study Information</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Study Type:</span>
-                    <span>{caseData.studyType}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">Date/Time:</span>
-                    <span>{caseData.timeReceived}</span>
-                  </div>
+                  <Textarea
+                    rows={3}
+                    value={caseData.riskFactors ?? ""}
+                    placeholder="Smoking, previous TB exposure, immunocompromised state..."
+                    onChange={(e) => queueCaseAutosave({ riskFactors: e.target.value || undefined })}
+                  />
                 </CardContent>
               </Card>
 
@@ -285,9 +498,37 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium text-amber-900">Clinical Notes</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-sm text-amber-800 leading-relaxed">
-                    {caseData.clinicalNotes || 'No specific clinical notes accompanying this study.'}
-                  </p>
+                  <Textarea
+                    rows={4}
+                    className="bg-white"
+                    value={caseData.clinicalNotes ?? ""}
+                    placeholder="Clinician notes..."
+                    onChange={(e) => queueCaseAutosave({ clinicalNotes: e.target.value || undefined })}
+                  />
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium">Differential & Plan</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Differential Diagnosis</div>
+                    <Textarea
+                      rows={3}
+                      value={caseData.differentialDiagnosis ?? ""}
+                      onChange={(e) => queueCaseAutosave({ differentialDiagnosis: e.target.value || undefined })}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500 mb-1">Recommended Steps</div>
+                    <Textarea
+                      rows={3}
+                      value={caseData.recommendedSteps ?? ""}
+                      onChange={(e) => queueCaseAutosave({ recommendedSteps: e.target.value || undefined })}
+                    />
+                  </div>
                 </CardContent>
               </Card>
             </div>
@@ -342,6 +583,7 @@ export function CaseReview() {
                     src={caseData.imagePath.startsWith("http") ? caseData.imagePath : `http://localhost:8000/${caseData.imagePath}`} 
                     className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
                     alt="Patient Radiograph" 
+                    onLoad={handleImageLoad}
                   />
                 ) : (
                   <svg viewBox="0 0 500 600" className="absolute inset-0 w-full h-full opacity-40">
@@ -356,25 +598,37 @@ export function CaseReview() {
 
                 {showAnnotations && (
                   <>
-                    {/* AI Annotation - Cavitary lesion */}
-                    <div className="absolute top-24 right-32 w-24 h-24 border-4 border-red-500 rounded-full animate-pulse">
-                      <div className="absolute -top-8 -right-16 bg-red-500 text-white text-xs px-2 py-1 rounded whitespace-nowrap">
-                        Cavitary lesion
-                      </div>
-                    </div>
-
-                    {/* AI Annotation - Infiltrates */}
-                    <div className="absolute top-32 right-24 w-32 h-20 border-2 border-orange-400 rounded-lg opacity-50">
-                    </div>
-                    <div className="absolute top-32 left-28 w-28 h-16 border-2 border-orange-400 rounded-lg opacity-50">
-                    </div>
+                    {annotationFindings.map((finding, idx) => {
+                      const x1 = finding.bbox_x1 as number;
+                      const y1 = finding.bbox_y1 as number;
+                      const x2 = finding.bbox_x2 as number;
+                      const y2 = finding.bbox_y2 as number;
+                      const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
+                      const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
+                      const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
+                      const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+                      const isPrimary = idx === 0;
+                      const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
+                      const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+                      return (
+                        <div
+                          key={`ann-${idx}-${finding.disease}`}
+                          className={`absolute border-2 ${boxClass} rounded-md shadow-lg`}
+                          style={{ left, top, width, height }}
+                        >
+                          <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
+                            {finding.disease.replace(/_/g, " ")}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </>
                 )}
 
                 {/* Image metadata overlay */}
                 <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
-                  <div>PT-2024-0347 | CXR PA</div>
-                  <div>2026-04-06 08:15</div>
+                  <div>{caseData.patientId} | {caseData.studyType}</div>
+                  <div>{caseData.timeReceived}</div>
                 </div>
               </div>
             </div>
@@ -386,20 +640,35 @@ export function CaseReview() {
           <ScrollArea className="h-full">
             <div className="p-4 space-y-4">
               {/* AI Status Banner - Shows when analysis is complete or pending */}
-              {caseData.aiStatus === "complete" ? (
+              {showHighPriorityAlert ? (
                 <Card className="border-red-300 bg-red-50">
                   <CardHeader className="pb-3">
                     <div className="flex items-center justify-between">
                       <CardTitle className="text-lg font-semibold text-red-900">High Priority</CardTitle>
                       <Badge variant="destructive" className="text-sm">
-                        TB Suspected
+                        {topFinding?.disease || "Critical finding"}
                       </Badge>
                     </div>
                   </CardHeader>
                   <CardContent>
                     <p className="text-sm text-red-800 leading-relaxed">
-                      Imaging findings highly suspicious for active pulmonary tuberculosis. 
-                      Immediate isolation and diagnostic workup recommended.
+                      {topFinding?.report || caseData.aiDraftReport || "AI analysis is complete. Review findings and proceed with clinical decision making."}
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : hasAiOutput ? (
+                <Card className="border-amber-300 bg-amber-50">
+                  <CardHeader className="pb-3">
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="text-lg font-semibold text-amber-900">Needs Review</CardTitle>
+                      <Badge variant="outline" className="text-sm border-amber-300 text-amber-800">
+                        low confidence
+                      </Badge>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-sm text-amber-900 leading-relaxed">
+                      AI output is available, but confidence is below the escalation threshold. Review with clinical context before urgent actions.
                     </p>
                   </CardContent>
                 </Card>
@@ -419,29 +688,35 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium">AI Confidence</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {caseData.aiStatus === "complete" ? (
+                  {hasAiOutput ? (
                     <>
                       <div className="flex items-center gap-3">
                         <div className="flex-1">
                           <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
                             <div 
                               className="h-full bg-green-500" 
-                              style={{ width: `${Math.round((caseData.confidence || 0) * (caseData.confidence <= 1 ? 100 : 1))}%` }}
+                              style={{ width: `${liveConfidence}%` }}
                             ></div>
                           </div>
                         </div>
                         <span className="text-2xl font-semibold text-green-700">
-                          {Math.round((caseData.confidence || 0) * (caseData.confidence <= 1 ? 100 : 1))}%
+                          {liveConfidence}%
                         </span>
                       </div>
                       <p className="text-xs text-slate-600 mt-2">
-                        High confidence in findings. Differential diagnosis considered.
+                        {hasLiveFindings ? "Live confidence from current model findings." : "Using case-level confidence."}
                       </p>
                     </>
                   ) : (
                     <div className="py-4 text-center">
-                      <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto mb-2" />
-                      <p className="text-sm text-slate-500 italic">AI Analysis in Progress...</p>
+                      {caseData.aiStatus === "analyzing" ? (
+                        <>
+                          <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto mb-2" />
+                          <p className="text-sm text-slate-500 italic">AI Analysis in Progress...</p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-slate-500 italic">Confidence will appear once AI output is available.</p>
+                      )}
                     </div>
                   )}
                 </CardContent>
@@ -453,45 +728,30 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium">Key Findings</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="flex items-start gap-2">
-                    <Badge variant="destructive" className="shrink-0 mt-0.5">1</Badge>
-                    <div className="text-sm">
-                      <div className="font-medium text-slate-900">Cavitary lesion - right upper lobe</div>
-                      <div className="text-slate-600 text-xs mt-0.5">
-                        3.2 cm diameter with thick irregular walls
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-2">
-                    <Badge variant="outline" className="shrink-0 mt-0.5 bg-orange-50 text-orange-700 border-orange-300">2</Badge>
-                    <div className="text-sm">
-                      <div className="font-medium text-slate-900">Bilateral upper lobe opacities</div>
-                      <div className="text-slate-600 text-xs mt-0.5">
-                        Nodular and reticulonodular pattern, right &gt; left
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-2">
-                    <Badge variant="outline" className="shrink-0 mt-0.5 bg-orange-50 text-orange-700 border-orange-300">3</Badge>
-                    <div className="text-sm">
-                      <div className="font-medium text-slate-900">Infiltrates and consolidation</div>
-                      <div className="text-slate-600 text-xs mt-0.5">
-                        Surrounding the cavitary lesion
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-2">
-                    <Badge variant="outline" className="shrink-0 mt-0.5">4</Badge>
-                    <div className="text-sm">
-                      <div className="font-medium text-slate-900">Volume loss</div>
-                      <div className="text-slate-600 text-xs mt-0.5">
-                        Mild right upper lobe volume reduction
-                      </div>
-                    </div>
-                  </div>
+                  {findingsLoading ? (
+                    <div className="py-2 text-sm text-slate-500 italic">Refreshing live findings...</div>
+                  ) : findings.length === 0 ? (
+                    <div className="py-2 text-sm text-slate-500 italic">No live findings available for this case yet.</div>
+                  ) : (
+                    findings.slice(0, 5).map((finding, idx) => {
+                      const badgeVariant = idx === 0 ? "destructive" : "outline";
+                      const conf = fmtConfidence(finding.confidence);
+                      return (
+                        <div key={`${finding.disease}-${idx}`} className="flex items-start gap-2">
+                          <Badge variant={badgeVariant} className="shrink-0 mt-0.5">{idx + 1}</Badge>
+                          <div className="text-sm">
+                            <div className="font-medium text-slate-900">{finding.disease.replace(/_/g, " ")}</div>
+                            <div className="text-slate-600 text-xs mt-0.5">
+                              Confidence: {conf}%
+                              {finding.bbox_x1 != null && finding.bbox_y1 != null && finding.bbox_x2 != null && finding.bbox_y2 != null
+                                ? ` | BBox: (${finding.bbox_x1}, ${finding.bbox_y1})-(${finding.bbox_x2}, ${finding.bbox_y2})`
+                                : ""}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </CardContent>
               </Card>
 
@@ -501,22 +761,18 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium">Differential Diagnosis</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-slate-900">Active pulmonary TB</span>
-                    <Badge className="bg-red-100 text-red-800 border-red-300">Primary</Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-700">Chronic silicosis + TB</span>
-                    <Badge variant="outline">Consider</Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-700">Necrotizing pneumonia</span>
-                    <Badge variant="outline">Less likely</Badge>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-700">Fungal infection</span>
-                    <Badge variant="outline">Less likely</Badge>
-                  </div>
+                  {caseData.differentialDiagnosis ? (
+                    <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{caseData.differentialDiagnosis}</div>
+                  ) : findings.length > 0 ? (
+                    findings.slice(0, 3).map((finding, idx) => (
+                      <div key={`ddx-${idx}`} className="flex items-center justify-between">
+                        <span className="text-slate-700">{finding.disease.replace(/_/g, " ")}</span>
+                        <Badge variant={idx === 0 ? "destructive" : "outline"}>{idx === 0 ? "Primary" : "Consider"}</Badge>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-slate-500 italic">No differential diagnosis has been generated yet.</div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -526,26 +782,16 @@ export function CaseReview() {
                   <CardTitle className="text-sm font-medium text-blue-900">Recommended Next Steps</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm text-blue-800">
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">1.</span>
-                    <span>Implement airborne isolation precautions immediately</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">2.</span>
-                    <span>Order GeneXpert MTB/RIF test (rapid molecular testing)</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">3.</span>
-                    <span>Collect 3 sputum samples for smear microscopy and culture</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">4.</span>
-                    <span>Initiate contact tracing for household members</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">5.</span>
-                    <span>Consider HIV testing if status unknown</span>
-                  </div>
+                  {recommendedSteps.length > 0 ? (
+                    recommendedSteps.map((step, idx) => (
+                      <div key={`step-${idx}`} className="flex items-start gap-2">
+                        <span className="shrink-0 font-semibold">{idx + 1}.</span>
+                        <span>{step}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-blue-800">No model-generated recommendations yet. Trigger analysis from the current experiment to populate this section.</div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -650,19 +896,26 @@ export function CaseReview() {
               </ScrollArea>
             )}
 
+            {chatLoading && (
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                AI copilot is thinking...
+              </div>
+            )}
+
             {/* Chat Input */}
             <div className="flex gap-2">
               <Input 
                 placeholder="Ask a question about this case..." 
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
+                onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
                 className="flex-1"
               />
               <Button size="icon" variant="outline">
                 <Mic className="h-4 w-4" />
               </Button>
-              <Button onClick={handleSendMessage}>
+              <Button onClick={handleSendMessage} disabled={chatLoading || !chatInput.trim()}>
                 <Send className="h-4 w-4 mr-2" />
                 Send
               </Button>

@@ -10,7 +10,7 @@ import {
   WifiOff,
   Clock,
   User,
-  Activity as PulseIcon
+  Database
 } from "lucide-react";
 import { api } from "../../api";
 import { Badge } from "./ui/badge";
@@ -18,26 +18,36 @@ import { Separator } from "./ui/separator";
 
 export function AppLayout() {
   const location = useLocation();
-  const [activeCaseId, setActiveCaseId] = useState<string>("PT-BD-RAHIM-3");
+  const [activeCaseId, setActiveCaseId] = useState<string>("");
   const [stats, setStats] = useState({ worklist: 0, escalations: 0 });
   const [isOffline, setIsOffline] = useState(false);
 
   useEffect(() => {
     const fetchSidebarData = async () => {
       try {
-        const [caseStats, cases] = await Promise.all([
+        const [, cases] = await Promise.all([
           api.getCaseStats(),
           api.getCases()
         ]);
+
+        const activeQueueCases = cases.filter((c) => c.aiStatus === "ready" || c.aiStatus === "analyzing");
         
-        // Update stats
+        // Sidebar worklist should reflect active queue, not all non-archived records.
         setStats({
-          worklist: caseStats.totalCases,
+          worklist: activeQueueCases.length,
           escalations: 0
         });
 
         if (cases && cases.length > 0) {
-          setActiveCaseId(cases[0].patientId);
+          const lastViewedCaseId = localStorage.getItem("hsil_last_viewed_case") || "";
+          const lastViewedCase = cases.find((c) => c.patientId === lastViewedCaseId);
+          const preferred =
+            lastViewedCase ||
+            cases.find((c) => c.aiStatus === "analyzing") ||
+            cases.find((c) => c.aiStatus === "ready") ||
+            cases.find((c) => c.aiStatus === "escalated") ||
+            cases[0];
+          setActiveCaseId(preferred.patientId);
         }
 
         const escStats = await api.getEscalationStats();
@@ -56,9 +66,10 @@ export function AppLayout() {
   }, []);
 
   const navItems = [
-    { path: "/dashboard", label: "Worklist", icon: ListTodo, badge: isOffline ? 0 : stats.worklist },
-    { path: `/dashboard/case/${activeCaseId}`, label: "Active Case", icon: FileText },
+    { path: "/dashboard", label: "Worklist", icon: ListTodo },
+    { path: `/dashboard/case/${activeCaseId}`, label: "Cases", icon: FileText },
     { path: "/dashboard/escalations", label: "Escalations", icon: AlertTriangle, badge: isOffline ? 0 : stats.escalations },
+    { path: "/dashboard/ehr", label: "EHR", icon: Database },
     { path: "/dashboard/new-report", label: "New Report", icon: FilePlus },
     { path: "/dashboard/settings", label: "System Status & Settings", icon: Settings },
   ];

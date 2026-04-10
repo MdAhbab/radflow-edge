@@ -1,10 +1,15 @@
 import { useState } from "react";
+import { useNavigate } from "react-router";
 import { Upload, FileImage, ClipboardList, Loader2, Link as LinkIcon, CheckCircle2 } from "lucide-react";
 import { api } from "../../../api";
+import { toast } from "sonner";
 
 export function NewReport() {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkedPatientFound, setLinkedPatientFound] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     age: "",
@@ -29,6 +34,46 @@ export function NewReport() {
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
+  const normalizeSexForUI = (rawSex: string | undefined): "Male" | "Female" | "Other" => {
+    const value = (rawSex || "").toLowerCase();
+    if (value === "m" || value === "male") return "Male";
+    if (value === "f" || value === "female") return "Female";
+    return "Other";
+  };
+
+  const normalizeSexForAPI = (rawSex: string): "M" | "F" | "O" => {
+    if (rawSex === "Male") return "M";
+    if (rawSex === "Female") return "F";
+    return "O";
+  };
+
+  const handleLoadLinkedPatient = async () => {
+    const linkedId = formData.patientIdLinked.trim();
+    if (!linkedId) {
+      toast.error("Enter a patient ID to load existing details.");
+      return;
+    }
+
+    setLinkLoading(true);
+    setLinkedPatientFound(false);
+    try {
+      const existing = await api.getCase(linkedId);
+      setFormData((prev) => ({
+        ...prev,
+        name: existing.name || prev.name,
+        age: existing.age ? String(existing.age) : prev.age,
+        sex: normalizeSexForUI(existing.sex),
+        complaint: existing.complaint || prev.complaint,
+      }));
+      setLinkedPatientFound(true);
+      toast.success(`Loaded patient details for ${linkedId}.`);
+    } catch (err) {
+      toast.error("Patient ID not found in database.");
+    } finally {
+      setLinkLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedFile) {
@@ -47,7 +92,7 @@ export function NewReport() {
       const newCaseData = {
         name: formData.name,
         age: parseInt(formData.age) || 0,
-        sex: formData.sex,
+        sex: normalizeSexForAPI(formData.sex),
         complaint: formData.complaint,
         imagePath: uploadedPath,
         aiStatus: "ready" as const,
@@ -56,12 +101,14 @@ export function NewReport() {
         patientId: formData.patientIdLinked || undefined 
       };
 
-      await api.createCase(newCaseData);
+      const createdCase = await api.createCase(newCaseData);
+      localStorage.setItem("hsil_last_viewed_case", createdCase.patientId);
       
       setSuccess(true);
       setFormData({ name: "", age: "", sex: "Male", complaint: "", patientIdLinked: "" });
       setSelectedFile(null);
       setPreview(null);
+      navigate(`/dashboard/case/${createdCase.patientId}`);
     } catch (err: any) {
       console.error("Submission error:", err);
       if (err.message?.includes("Failed to fetch") || err.message?.includes("NetworkError")) {
@@ -143,7 +190,7 @@ export function NewReport() {
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Link to Previous Patient ID (Optional)
                 </label>
-                <div className="relative">
+                <div className="relative flex gap-2">
                   <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                     <LinkIcon className="h-4 w-4 text-slate-400" />
                   </div>
@@ -155,8 +202,21 @@ export function NewReport() {
                     placeholder="e.g. PT-BD-001"
                     className="block w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm transition-colors"
                   />
+                  <button
+                    type="button"
+                    onClick={handleLoadLinkedPatient}
+                    disabled={linkLoading}
+                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {linkLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Load"}
+                  </button>
                 </div>
-                <p className="text-xs text-slate-500 mt-1">Leave blank to assign a new ID.</p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Leave blank to assign a new ID. Use Load to prefill details from DB.
+                </p>
+                {linkedPatientFound && (
+                  <p className="text-xs text-emerald-600 mt-1">Existing patient details loaded and ready for edit.</p>
+                )}
               </div>
 
               <hr className="border-slate-100" />
