@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { 
   Search, 
   Filter,
@@ -9,7 +9,9 @@ import {
   TrendingUp,
   ArrowRight,
   Loader2,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw,
+  UserCheck
 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -24,35 +26,133 @@ import {
   TableRow,
 } from "../ui/table";
 import { api, EscalationData, EscalationStats } from "../../../api";
+import { toast } from "sonner";
 
 
 export function Escalations() {
+  const navigate = useNavigate();
   const [cases, setCases] = useState<EscalationData[]>([]);
   const [stats, setStats] = useState<EscalationStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("awaiting");
   const [searchQuery, setSearchQuery] = useState("");
+  const [updatingPatientId, setUpdatingPatientId] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
+
+  const computeStatsFromCases = (items: EscalationData[]): EscalationStats => {
+    const count = (status: EscalationData["status"]) => items.filter((item) => item.status === status).length;
+    return {
+      awaiting: count("awaiting"),
+      inReview: count("in-review"),
+      returned: count("returned"),
+      finalized: count("finalized"),
+    };
+  };
+
+  const applyOptimisticStatus = (
+    patientId: string,
+    status: EscalationData["status"],
+    assignedTo?: string,
+  ): EscalationData[] => {
+    const nextCases = cases.map((item) =>
+      item.patientId === patientId
+        ? {
+            ...item,
+            status,
+            assignedTo: assignedTo === undefined ? item.assignedTo : assignedTo,
+          }
+        : item
+    );
+    setCases(nextCases);
+    setStats(computeStatsFromCases(nextCases));
+    return nextCases;
+  };
+
+  const fetchData = async (background = false) => {
+    if (background) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
+    setError(null);
+    try {
+      const [casesData, statsData] = await Promise.all([
+        api.getEscalations(),
+        api.getEscalationStats()
+      ]);
+      setCases(casesData);
+      setStats(statsData);
+      setLastUpdatedAt(new Date());
+      setSecondsSinceUpdate(0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch data");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const [casesData, statsData] = await Promise.all([
-          api.getEscalations(),
-          api.getEscalationStats()
-        ]);
-        setCases(casesData);
-        setStats(statsData);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch data");
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
+    fetchData(false);
+    const interval = setInterval(() => {
+      fetchData(true);
+    }, 10000);
+    return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!lastUpdatedAt) return;
+    const timer = setInterval(() => {
+      const elapsed = Math.max(0, Math.floor((Date.now() - lastUpdatedAt.getTime()) / 1000));
+      setSecondsSinceUpdate(elapsed);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lastUpdatedAt]);
+
+  const handleStartReview = async (case_: EscalationData) => {
+    setUpdatingPatientId(case_.patientId);
+    const previousCases = cases;
+    applyOptimisticStatus(case_.patientId, "in-review", case_.assignedTo || "Available Specialist");
+    try {
+      await api.updateEscalation(case_.patientId, {
+        status: "in-review",
+        assignedTo: case_.assignedTo || "Available Specialist",
+      });
+      toast.success(`Marked ${case_.patientId} as in-review and opened specialist workspace.`);
+      await fetchData(true);
+      navigate(`/dashboard/specialist/${case_.patientId}`);
+    } catch (err) {
+      setCases(previousCases);
+      setStats(computeStatsFromCases(previousCases));
+      toast.error(err instanceof Error ? err.message : "Failed to update escalation status");
+    } finally {
+      setUpdatingPatientId(null);
+    }
+  };
+
+  const handleSendBackToAwaiting = async (case_: EscalationData) => {
+    setUpdatingPatientId(case_.patientId);
+    const previousCases = cases;
+    applyOptimisticStatus(case_.patientId, "awaiting", undefined);
+    try {
+      await api.updateEscalation(case_.patientId, {
+        status: "awaiting",
+        assignedTo: undefined,
+      });
+      toast.success(`Moved ${case_.patientId} back to awaiting queue.`);
+      await fetchData(true);
+    } catch (err) {
+      setCases(previousCases);
+      setStats(computeStatsFromCases(previousCases));
+      toast.error(err instanceof Error ? err.message : "Failed to update escalation status");
+    } finally {
+      setUpdatingPatientId(null);
+    }
+  };
 
   const getPriorityBadge = (priority: string) => {
     const variants = {
@@ -152,9 +252,16 @@ export function Escalations() {
           <div>
             <h2 className="text-2xl font-semibold text-slate-900">Specialist Escalations</h2>
             <p className="text-sm text-slate-600 mt-1">Cases referred for expert review</p>
+            <p className="text-xs text-slate-500 mt-1">
+              {lastUpdatedAt ? `Last updated ${secondsSinceUpdate}s ago` : "Waiting for first refresh..."}
+            </p>
           </div>
           
           <div className="flex gap-2">
+            <Button variant="outline" onClick={() => fetchData(true)} disabled={refreshing || loading}>
+              {refreshing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
+              Refresh
+            </Button>
             <Button variant="outline">
               <Filter className="h-4 w-4 mr-2" />
               Filters
@@ -286,11 +393,11 @@ export function Escalations() {
                     <TableCell>{getTriageBadge(case_.aiTriage)}</TableCell>
                     <TableCell className="text-right">
                       <span className={`font-medium ${
-                        case_.confidence >= 85 ? "text-green-700" :
-                        case_.confidence >= 70 ? "text-yellow-700" :
+                        (case_.confidence <= 1 ? case_.confidence * 100 : case_.confidence) >= 85 ? "text-green-700" :
+                        (case_.confidence <= 1 ? case_.confidence * 100 : case_.confidence) >= 70 ? "text-yellow-700" :
                         "text-orange-700"
                       }`}>
-                        {case_.confidence}%
+                        {Math.round((case_.confidence || 0) * ((case_.confidence || 0) <= 1 ? 100 : 1))}%
                       </span>
                     </TableCell>
                     <TableCell>
@@ -305,16 +412,40 @@ export function Escalations() {
                       </TableCell>
                     )}
                     <TableCell className="text-right">
-                      <Link to={`/dashboard/specialist/${case_.patientId}`}>
-                        <Button 
-                          size="sm" 
-                          variant="outline"
-                          className="opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Eye className="h-4 w-4 mr-1.5" />
-                          Open Review
-                        </Button>
-                      </Link>
+                      <div className="flex justify-end gap-2">
+                        {case_.status === "awaiting" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleStartReview(case_)}
+                            disabled={updatingPatientId === case_.patientId}
+                          >
+                            {updatingPatientId === case_.patientId ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <UserCheck className="h-4 w-4 mr-1.5" />}
+                            Start Review
+                          </Button>
+                        )}
+                        {case_.status === "in-review" && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleSendBackToAwaiting(case_)}
+                            disabled={updatingPatientId === case_.patientId}
+                          >
+                            {updatingPatientId === case_.patientId ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <ArrowRight className="h-4 w-4 mr-1.5" />}
+                            Return Queue
+                          </Button>
+                        )}
+                        <Link to={`/dashboard/specialist/${case_.patientId}`}>
+                          <Button 
+                            size="sm" 
+                            variant="outline"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <Eye className="h-4 w-4 mr-1.5" />
+                            Open Review
+                          </Button>
+                        </Link>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))

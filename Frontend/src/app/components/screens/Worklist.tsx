@@ -39,24 +39,40 @@ export function Worklist() {
   const [activeTab, setActiveTab] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
 
+  const newCount = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing").length;
+  const readyCount = cases.filter(c => c.aiStatus === "ready").length;
+  const escalatedCount = cases.filter(c => c.aiStatus === "escalated").length;
+
   useEffect(() => {
+    let mounted = true;
+
     const fetchData = async () => {
-      setLoading(true);
+      if (!mounted) return;
       setError(null);
       try {
         const [casesData, statsData] = await Promise.all([
           api.getCases(),
           api.getCaseStats()
         ]);
+        if (!mounted) return;
         setCases(casesData);
         setStats(statsData);
       } catch (err) {
+        if (!mounted) return;
         setError(err instanceof Error ? err.message : "Failed to fetch data");
       } finally {
-        setLoading(false);
+        if (mounted) setLoading(false);
       }
     };
+
+    setLoading(true);
     fetchData();
+    const intervalId = setInterval(fetchData, 10000);
+
+    return () => {
+      mounted = false;
+      clearInterval(intervalId);
+    };
   }, []);
 
   const getTriageBadge = (color: string, priority?: string) => {
@@ -152,8 +168,8 @@ export function Worklist() {
         {/* Summary Stats */}
         <div className="grid grid-cols-4 gap-4">
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <div className="text-2xl font-semibold text-blue-900">{stats?.newCases || 0}</div>
-            <div className="text-sm text-blue-700">New Cases</div>
+            <div className="text-2xl font-semibold text-blue-900">{newCount}</div>
+            <div className="text-sm text-blue-700">Queue Cases</div>
           </div>
           <div className="bg-red-50 border border-red-200 rounded-lg p-4">
             <div className="text-2xl font-semibold text-red-900">{stats?.urgentCases || 0}</div>
@@ -169,10 +185,10 @@ export function Worklist() {
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList className="w-full justify-start">
             <TabsTrigger value="all">All Cases ({stats?.totalCases || 0})</TabsTrigger>
-            <TabsTrigger value="new">New ({stats?.newCases || 0})</TabsTrigger>
-            <TabsTrigger value="ready">AI Ready ({cases.filter(c => c.aiStatus === "ready").length})</TabsTrigger>
+            <TabsTrigger value="new">New ({newCount})</TabsTrigger>
+            <TabsTrigger value="ready">AI Ready ({readyCount})</TabsTrigger>
             <TabsTrigger value="priority">High Priority ({stats?.urgentCases || 0})</TabsTrigger>
-            <TabsTrigger value="escalated">Escalated ({stats?.escalatedCases || 0})</TabsTrigger>
+            <TabsTrigger value="escalated">Escalated ({escalatedCount})</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -275,6 +291,7 @@ export function Worklist() {
                         size="sm" 
                         variant="outline"
                         className="opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => localStorage.setItem("hsil_last_viewed_case", case_.patientId)}
                       >
                         <Eye className="h-4 w-4 mr-1.5" />
                         Review

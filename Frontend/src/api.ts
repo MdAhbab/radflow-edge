@@ -27,6 +27,7 @@ export interface CaseData {
 
 export interface SystemStatus {
   status: string;
+  active_model?: string;
   uptime: string;
   cpu_usage: number;
   memory_usage: number;
@@ -40,6 +41,7 @@ export interface SystemStatus {
   queue_length: number;
   estimated_wait_time: string;
   recent_errors: number;
+  pipeline_stream?: string[];
 }
 
 export interface EscalationData {
@@ -54,6 +56,30 @@ export interface EscalationData {
   timeWaiting: string;
   status: "awaiting" | "in-review" | "returned" | "finalized";
   assignedTo?: string;
+  specialistNotes?: string;
+}
+
+export interface EHRTimelineEntry {
+  timestamp: string;
+  entryType: string;
+  title: string;
+  details: string;
+  status?: string;
+  confidence?: number;
+}
+
+export interface DeletePatientHistoryResult {
+  patientId: string;
+  softDeletedCases: number;
+  softDeletedFindings: number;
+  softDeletedEscalations: number;
+}
+
+export interface RecycleBinItem {
+  patientId: string;
+  caseCount: number;
+  escalationCount: number;
+  deletedAt?: string;
 }
 
 export interface CaseStats {
@@ -69,6 +95,40 @@ export interface EscalationStats {
   inReview: number;
   returned: number;
   finalized: number;
+}
+
+export interface LegacyReanalyzeRequest {
+  onlyMissingFindings?: boolean;
+  includeArchived?: boolean;
+  limit?: number;
+  continueOnError?: boolean;
+}
+
+export interface LegacyReanalyzeResult {
+  totalConsidered: number;
+  processed: number;
+  analyzed: number;
+  bootstrapped: number;
+  skippedHasFindings: number;
+  skippedMissingImage: number;
+  failed: number;
+  errors: string[];
+}
+
+export interface FindingData {
+  case_id: string;
+  disease: string;
+  confidence: number;
+  bbox_x1?: number | null;
+  bbox_y1?: number | null;
+  bbox_x2?: number | null;
+  bbox_y2?: number | null;
+  report?: string | null;
+  severity?: string | null;
+}
+
+export interface ChatResponse {
+  response: string;
 }
 
 const API_BASE = "http://localhost:8000/api/v1";
@@ -92,6 +152,12 @@ export const api = {
     return res.json();
   },
 
+  async getFindings(patientId: string): Promise<FindingData[]> {
+    const res = await fetch(`${API_BASE}/findings/${patientId}`);
+    if (!res.ok) throw new Error("Failed to fetch findings");
+    return res.json();
+  },
+
   async updateCase(patientId: string, data: Partial<CaseData>): Promise<{status: string}> {
     const res = await fetch(`${API_BASE}/cases/${patientId}`, {
       method: "PUT",
@@ -102,9 +168,20 @@ export const api = {
     return res.json();
   },
 
-  async getEscalations(): Promise<EscalationData[]> {
-    const res = await fetch(`${API_BASE}/escalations`);
+  async getEscalations(status?: EscalationData["status"]): Promise<EscalationData[]> {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : "";
+    const res = await fetch(`${API_BASE}/escalations${suffix}`);
     if (!res.ok) throw new Error("Failed to fetch escalations");
+    return res.json();
+  },
+
+  async createEscalation(data: EscalationData): Promise<EscalationData> {
+    const res = await fetch(`${API_BASE}/escalations`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(data)
+    });
+    if (!res.ok) throw new Error("Failed to create escalation");
     return res.json();
   },
   
@@ -130,6 +207,21 @@ export const api = {
     return res.json();
   },
 
+  async reanalyzeLegacy(payload: LegacyReanalyzeRequest = {}): Promise<LegacyReanalyzeResult> {
+    const res = await fetch(`${API_BASE}/admin/reanalyze-legacy`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        onlyMissingFindings: payload.onlyMissingFindings ?? true,
+        includeArchived: payload.includeArchived ?? true,
+        limit: payload.limit,
+        continueOnError: payload.continueOnError ?? true,
+      }),
+    });
+    if (!res.ok) throw new Error("Failed to run legacy reanalysis");
+    return res.json();
+  },
+
   async getAiModel(): Promise<string> {
     const res = await fetch(`${API_BASE}/system/model`);
     const data = await res.json();
@@ -142,7 +234,18 @@ export const api = {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ modelId })
     });
-    if (!res.ok) throw new Error("Failed to set AI model");
+    if (!res.ok) {
+      let detail = "Failed to set AI model";
+      try {
+        const data = await res.json();
+        if (data?.detail) {
+          detail = String(data.detail);
+        }
+      } catch {
+        // Keep generic error when backend does not return JSON
+      }
+      throw new Error(detail);
+    }
   },
 
   async createCase(data: Partial<CaseData>): Promise<CaseData> {
@@ -172,5 +275,40 @@ export const api = {
     if (!res.ok) throw new Error("Failed to upload file");
     const data = await res.json();
     return data.imagePath;
+  },
+
+  async askClinicalCopilot(patientId: string, message: string): Promise<string> {
+    const res = await fetch(`${API_BASE}/chat`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ patientId, message })
+    });
+    if (!res.ok) throw new Error("Failed to query AI copilot");
+    const data: ChatResponse = await res.json();
+    return data.response;
+  },
+
+  async getEhrTimeline(patientId: string): Promise<EHRTimelineEntry[]> {
+    const res = await fetch(`${API_BASE}/ehr/${patientId}/timeline`);
+    if (!res.ok) throw new Error("Failed to fetch EHR timeline");
+    return res.json();
+  },
+
+  async deletePatientHistory(patientId: string): Promise<DeletePatientHistoryResult> {
+    const res = await fetch(`${API_BASE}/ehr/${patientId}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete patient history");
+    return res.json();
+  },
+
+  async getRecycleBin(): Promise<RecycleBinItem[]> {
+    const res = await fetch(`${API_BASE}/admin/recycle-bin`);
+    if (!res.ok) throw new Error("Failed to fetch recycle bin");
+    return res.json();
+  },
+
+  async restorePatientHistory(patientId: string): Promise<DeletePatientHistoryResult> {
+    const res = await fetch(`${API_BASE}/admin/recycle-bin/${patientId}/restore`, { method: "POST" });
+    if (!res.ok) throw new Error("Failed to restore patient history");
+    return res.json();
   }
 };

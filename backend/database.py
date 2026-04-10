@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, create_engine
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
@@ -42,6 +42,8 @@ class Case(Base):
     ai_draft_report = Column(Text, nullable=True)
     
     is_archived = Column(Integer, default=0)
+    is_deleted = Column(Integer, default=0)
+    deleted_at = Column(DateTime, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -59,6 +61,8 @@ class Finding(Base):
     bbox_y2 = Column(Integer, nullable=True)
     report = Column(Text, nullable=True)
     severity = Column(String(20), nullable=True)
+    is_deleted = Column(Integer, default=0)
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Escalation(Base):
@@ -76,6 +80,9 @@ class Escalation(Base):
     time_waiting = Column(String(20), default="0h 0m")
     status = Column(String(20), default="awaiting")
     assigned_to = Column(String(100), nullable=True)
+    specialist_notes = Column(Text, nullable=True)
+    is_deleted = Column(Integer, default=0)
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -92,3 +99,36 @@ class SystemStats(Base):
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
+
+
+def _run_sqlite_migrations() -> None:
+    """Apply additive SQLite schema updates for existing local databases."""
+    with engine.connect() as conn:
+        esc_columns = conn.execute(text("PRAGMA table_info(escalations)")).fetchall()
+        esc_names = {row[1] for row in esc_columns}
+
+        if "specialist_notes" not in esc_names:
+            conn.execute(text("ALTER TABLE escalations ADD COLUMN specialist_notes TEXT"))
+        if "is_deleted" not in esc_names:
+            conn.execute(text("ALTER TABLE escalations ADD COLUMN is_deleted INTEGER DEFAULT 0"))
+        if "deleted_at" not in esc_names:
+            conn.execute(text("ALTER TABLE escalations ADD COLUMN deleted_at DATETIME"))
+
+        case_columns = conn.execute(text("PRAGMA table_info(cases)")).fetchall()
+        case_names = {row[1] for row in case_columns}
+        if "is_deleted" not in case_names:
+            conn.execute(text("ALTER TABLE cases ADD COLUMN is_deleted INTEGER DEFAULT 0"))
+        if "deleted_at" not in case_names:
+            conn.execute(text("ALTER TABLE cases ADD COLUMN deleted_at DATETIME"))
+
+        finding_columns = conn.execute(text("PRAGMA table_info(findings)")).fetchall()
+        finding_names = {row[1] for row in finding_columns}
+        if "is_deleted" not in finding_names:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN is_deleted INTEGER DEFAULT 0"))
+        if "deleted_at" not in finding_names:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN deleted_at DATETIME"))
+
+        conn.commit()
+
+
+_run_sqlite_migrations()

@@ -1,5 +1,6 @@
 import platform
 import torch
+import importlib.util
 
 class MiddlewareRouter:
     """
@@ -15,9 +16,13 @@ class MiddlewareRouter:
         print(f"Detected System: {system} | Architecture: {machine}")
         
         if system == "Darwin" and machine == "arm64":
-            print("Apple Silicon detected. Routing to mlx-vlm (Unified Memory).")
-            # Note: For this to work fully in execution, mlx-vlm package must be installed.
-            return "mlx"
+            mlx_available = importlib.util.find_spec("mlx_vlm") is not None
+            if mlx_available:
+                print("Apple Silicon detected. Routing to mlx-vlm (Unified Memory).")
+                return "mlx"
+
+            print("Apple Silicon detected but mlx-vlm is not installed. Falling back to CPU transformers.")
+            return "cpu"
         
         elif torch.cuda.is_available():
             print("NVIDIA GPU detected. Routing to Hugging Face transformers (bitsandbytes 4-bit).")

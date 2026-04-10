@@ -7,14 +7,19 @@ import {
   MemoryStick, 
   Clock, 
   AlertTriangle,
-  Play
+  Play,
+  Shield,
+  Loader2
 } from "lucide-react";
 import { api, SystemStatus as SystemStatusType } from "../../../api";
+import { toast } from "sonner";
 
 export function SystemStatus() {
   const [status, setStatus] = useState<SystemStatusType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -22,6 +27,7 @@ export function SystemStatus() {
       try {
         const data = await api.getSystemStatus();
         setStatus(data);
+        setLastFetchedAt(new Date());
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load system status");
       } finally {
@@ -63,21 +69,26 @@ export function SystemStatus() {
           <div>
             <h2 className="text-2xl font-semibold text-slate-900">System Parameters & Status</h2>
             <p className="text-sm text-slate-600 mt-1">Real-time health of RadFlow processes</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Real-time source: backend status API{lastFetchedAt ? ` @ ${lastFetchedAt.toLocaleTimeString()}` : ""}
+            </p>
           </div>
           <div className="flex items-center gap-4">
             <div className="flex flex-col items-end">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Active AI Model</label>
               <select 
                 className="bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2"
-                value={(status as any).active_model || 'experiment1'}
+                value={status.active_model || 'experiment1'}
                 onChange={async (e) => {
                   const newModel = e.target.value;
                   try {
                     await api.setAiModel(newModel);
                     const data = await api.getSystemStatus();
                     setStatus(data);
+                    toast.success(`Switched pipeline to ${newModel}`);
                   } catch (err) {
-                    alert("Failed to update AI model");
+                    const message = err instanceof Error ? err.message : "Failed to update AI model";
+                    toast.error(message);
                   }
                 }}
               >
@@ -87,6 +98,36 @@ export function SystemStatus() {
                 <option value="none">AI Disabled</option>
               </select>
             </div>
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-sm font-medium disabled:opacity-50"
+              disabled={reanalyzing}
+              onClick={async () => {
+                setReanalyzing(true);
+                toast.info("Legacy reanalysis started. This may take a while on large datasets.");
+                try {
+                  const result = await api.reanalyzeLegacy({
+                    onlyMissingFindings: true,
+                    includeArchived: true,
+                    continueOnError: true,
+                  });
+                  const message = `Processed ${result.processed}/${result.totalConsidered}; analyzed ${result.analyzed}, bootstrapped ${result.bootstrapped}, failed ${result.failed}.`;
+                  if (result.failed > 0) {
+                    toast.warning(message);
+                  } else {
+                    toast.success(message);
+                  }
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : "Failed to run legacy reanalysis";
+                  toast.error(message);
+                } finally {
+                  setReanalyzing(false);
+                }
+              }}
+            >
+              {reanalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+              {reanalyzing ? "Reanalyzing..." : "Admin: Reanalyze Legacy"}
+            </button>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-green-50 text-green-700 rounded-full border border-green-200 text-sm font-medium h-fit">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
               {status.status.toUpperCase()}
@@ -211,11 +252,18 @@ export function SystemStatus() {
                 Pipeline Stream
               </h3>
               <div className="font-mono text-xs text-slate-400 space-y-2 mt-4">
-                <p>DICOM recved: ID 88921</p>
-                <p>Preproc... done</p>
-                <p className="text-green-400">Model Foveal-v2 init...</p>
-                <p>Inference completed (0.8s)</p>
-                <p className="text-slate-500">Awaiting next payload</p>
+                {(status.pipeline_stream && status.pipeline_stream.length > 0
+                  ? status.pipeline_stream
+                  : [
+                      `Pipeline mode: ${status.active_model || "unknown"}`,
+                      `Queue length: ${status.queue_length}`,
+                      `Estimated wait: ${status.estimated_wait_time}`,
+                      `Recent errors: ${status.recent_errors}`,
+                      "Awaiting next payload",
+                    ]
+                ).map((line, idx) => (
+                  <p key={`${line}-${idx}`} className={idx === 0 ? "text-green-400" : "text-slate-300"}>{line}</p>
+                ))}
               </div>
             </div>
           </div>

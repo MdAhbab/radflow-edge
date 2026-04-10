@@ -73,7 +73,7 @@ export function SpecialistReview() {
   const handleApprove = async () => {
     if (!patientId) return;
     try {
-      await api.updateEscalation(patientId, { status: "finalized" });
+      await api.updateEscalation(patientId, { status: "finalized", specialistNotes: specialistNotes || undefined });
       alert("Report approved and finalized");
     } catch (err) {
       alert("Failed to approve report");
@@ -83,18 +83,19 @@ export function SpecialistReview() {
   const handleReturn = async () => {
     if (!patientId) return;
     try {
-      await api.updateEscalation(patientId, { status: "returned" });
+      await api.updateEscalation(patientId, { status: "returned", specialistNotes: specialistNotes || undefined });
       alert("Case returned to clinic");
     } catch (err) {
       alert("Failed to return case");
     }
   };
 
-  const aiDraftReport = `FINDINGS:
-There is a 3.2 cm cavitary lesion in the right upper lobe with thick irregular walls. Bilateral upper lobe nodular and reticulonodular opacities are present, more prominent on the right. Surrounding infiltrates and mild volume loss in the right upper lobe are noted.
-
-IMPRESSION:
-Findings highly suspicious for active pulmonary tuberculosis. Differential includes chronic silicosis with superimposed TB or necrotizing pneumonia. Clinical correlation and immediate microbiological confirmation recommended.`;
+  const aiDraftReport = caseData?.aiDraftReport || "No AI draft report available for this case.";
+  const recommendedSteps = (caseData?.recommendedSteps || "")
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+    .filter((line) => line.length > 3)
+    .slice(0, 6);
 
   if (loading) {
     return (
@@ -191,7 +192,7 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-orange-700">Referred By</span>
-                    <span className="text-sm font-medium text-orange-900">Nurse S. Odhiambo</span>
+                    <span className="text-sm font-medium text-orange-900">Clinical Team</span>
                   </div>
                 </CardContent>
               </Card>
@@ -238,23 +239,23 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                 <CardContent className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-slate-600">Temperature:</span>
-                    <span>37.1°C</span>
+                    <span>{caseData?.vitalTemp ?? "--"}°C</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Heart Rate:</span>
-                    <span>88 bpm</span>
+                    <span>{caseData?.vitalHr ?? "--"} bpm</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">BP:</span>
-                    <span>135/82 mmHg</span>
+                    <span>{caseData?.vitalBp ?? "--"} mmHg</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Resp Rate:</span>
-                    <span className="font-medium">20 /min</span>
+                    <span className="font-medium">{caseData?.vitalResp ?? "--"} /min</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">SpO2:</span>
-                    <span>93% (room air)</span>
+                    <span>{caseData?.vitalSpo2 ?? "--"}% (room air)</span>
                   </div>
                 </CardContent>
               </Card>
@@ -264,23 +265,8 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   <CardTitle className="text-sm font-medium">Clinical History</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
-                  <div className="flex items-start gap-2">
-                    <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 shrink-0">
-                      Important
-                    </Badge>
-                    <span className="text-slate-700">25 years employment in silica mining</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200 shrink-0">
-                      Alert
-                    </Badge>
-                    <span className="text-slate-700">Previous TB treatment (2018) - completed</span>
-                  </div>
-                  <div className="pt-2 space-y-1 text-slate-600">
-                    <div>• Known silicosis diagnosis (2019)</div>
-                    <div>• Chronic respiratory symptoms</div>
-                    <div>• Non-smoker</div>
-                    <div>• No other chronic conditions</div>
+                  <div className="text-slate-700 whitespace-pre-wrap">
+                    {caseData?.riskFactors || "No risk-factor history entered yet."}
                   </div>
                 </CardContent>
               </Card>
@@ -292,19 +278,19 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                 <CardContent className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-slate-600">Study Type:</span>
-                    <span>Chest X-Ray</span>
+                    <span>{caseData?.studyType || "--"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Views:</span>
-                    <span>PA</span>
+                    <span>{caseData?.studyType?.includes("PA") ? "PA" : "--"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Date/Time:</span>
-                    <span>2026-04-06 07:41</span>
+                    <span>{caseData?.timeReceived || "--"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">Ordering Provider:</span>
-                    <span>Dr. M. Omondi</span>
+                    <span>Primary Clinician</span>
                   </div>
                 </CardContent>
               </Card>
@@ -328,9 +314,7 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   </div>
                   <div className="pt-2 border-t border-blue-200">
                     <p className="text-xs text-blue-800 leading-relaxed">
-                      AI detected complex bilateral upper lobe findings with nodular opacities and possible 
-                      progressive massive fibrosis. Pattern consistent with chronic silicosis with possible 
-                      superimposed active TB. Low confidence due to overlapping features requiring expert differentiation.
+                      {caseData?.aiDraftReport || "AI analysis context will appear here after model processing."}
                     </p>
                   </div>
                 </CardContent>
@@ -377,27 +361,21 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
           {/* X-Ray Image */}
           <div className="flex-1 flex items-center justify-center p-8">
             <div className="relative" style={{ transform: `scale(${zoom / 100})` }}>
-              {/* Placeholder X-ray */}
               <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden">
-                {/* Simulated X-ray gradient */}
                 <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
-                
-                {/* Lung silhouette simulation */}
-                <svg viewBox="0 0 500 600" className="absolute inset-0 w-full h-full opacity-40">
-                  {/* Right lung */}
-                  <ellipse cx="180" cy="300" rx="120" ry="200" fill="#666" />
-                  {/* Left lung */}
-                  <ellipse cx="320" cy="300" rx="120" ry="200" fill="#666" />
-                  {/* Trachea */}
-                  <rect x="240" y="50" width="20" height="150" fill="#555" />
-                  {/* Upper lobe nodular pattern */}
-                  <circle cx="160" cy="180" r="8" fill="#555" opacity="0.8" />
-                  <circle cx="175" cy="165" r="6" fill="#555" opacity="0.8" />
-                  <circle cx="190" cy="175" r="7" fill="#555" opacity="0.8" />
-                  <circle cx="300" cy="170" r="9" fill="#555" opacity="0.8" />
-                  <circle cx="320" cy="160" r="7" fill="#555" opacity="0.8" />
-                  <circle cx="335" cy="175" r="8" fill="#555" opacity="0.8" />
-                </svg>
+                {caseData?.imagePath ? (
+                  <img
+                    src={caseData.imagePath.startsWith("http") ? caseData.imagePath : `http://localhost:8000/${caseData.imagePath}`}
+                    className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80"
+                    alt="Radiograph"
+                  />
+                ) : (
+                  <svg viewBox="0 0 500 600" className="absolute inset-0 w-full h-full opacity-40">
+                    <ellipse cx="180" cy="300" rx="120" ry="200" fill="#666" />
+                    <ellipse cx="320" cy="300" rx="120" ry="200" fill="#666" />
+                    <rect x="240" y="50" width="20" height="150" fill="#555" />
+                  </svg>
+                )}
 
                 {showAnnotations && (
                   <>
@@ -419,10 +397,9 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   </>
                 )}
 
-                {/* Image metadata overlay */}
                 <div className="absolute bottom-2 left-2 text-xs text-slate-400 font-mono">
-                  <div>PT-2024-0344 | CXR PA</div>
-                  <div>2026-04-06 07:41</div>
+                  <div>{escalation.patientId} | {caseData?.studyType || "--"}</div>
+                  <div>{caseData?.timeReceived || "--"}</div>
                 </div>
               </div>
             </div>
@@ -439,29 +416,13 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-sm font-medium">AI Draft Report</CardTitle>
                     <Badge variant="outline" className="bg-slate-100 text-slate-700">
-                      Confidence: 62%
+                      Confidence: {Math.round((escalation.confidence || 0) * (escalation.confidence <= 1 ? 100 : 1))}%
                     </Badge>
                   </div>
                 </CardHeader>
                 <CardContent>
                   <div className="text-sm space-y-3 text-slate-700 leading-relaxed">
-                    <div>
-                      <div className="font-medium text-slate-900 mb-1">FINDINGS:</div>
-                      <p>
-                        Bilateral upper lobe nodular and reticulonodular opacities consistent with chronic silicosis. 
-                        Possible progressive massive fibrosis (PMF) in the right upper zone. Areas of increased opacity 
-                        suggestive of potential active inflammatory process or superimposed infection. Mild volume loss 
-                        in upper zones bilaterally.
-                      </p>
-                    </div>
-                    <div>
-                      <div className="font-medium text-slate-900 mb-1">IMPRESSION:</div>
-                      <p>
-                        Changes consistent with chronic silicosis. Cannot exclude superimposed active pulmonary 
-                        tuberculosis given patient's occupational history, previous TB, and current symptoms. 
-                        Clinical correlation with sputum studies strongly recommended.
-                      </p>
-                    </div>
+                    <div className="whitespace-pre-wrap">{aiDraftReport}</div>
                   </div>
                 </CardContent>
               </Card>
@@ -475,12 +436,11 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="text-sm text-amber-800 space-y-2">
-                  <div>• 25 years silica dust exposure</div>
-                  <div>• Known silicosis (2019)</div>
-                  <div>• Previous TB treatment (2018)</div>
-                  <div>• Current symptoms: 8-month chronic cough, hemoptysis</div>
+                  <div>• Complaint: {caseData?.complaint || "Not provided"}</div>
+                  <div>• Risk factors: {caseData?.riskFactors || "Not provided"}</div>
+                  <div>• Clinical notes: {caseData?.clinicalNotes || "Not provided"}</div>
                   <div className="pt-2 border-t border-amber-300 text-amber-900 font-medium">
-                    Key Question: Reactivation TB vs silico-tuberculosis?
+                    Key Question: Do findings support immediate intervention or follow-up management?
                   </div>
                 </CardContent>
               </Card>
@@ -546,26 +506,16 @@ Findings highly suspicious for active pulmonary tuberculosis. Differential inclu
                   <CardTitle className="text-sm font-medium text-blue-900">Suggested Management</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm text-blue-800">
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">1.</span>
-                    <span>Collect 3 sputum samples for GeneXpert and culture</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">2.</span>
-                    <span>Start empiric TB treatment if high clinical suspicion</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">3.</span>
-                    <span>Consider CT chest if sputum negative but suspicion remains</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">4.</span>
-                    <span>Monitor for drug-resistant TB given previous treatment</span>
-                  </div>
-                  <div className="flex items-start gap-2">
-                    <span className="shrink-0 font-semibold">5.</span>
-                    <span>Occupational medicine referral for silicosis management</span>
-                  </div>
+                  {recommendedSteps.length > 0 ? (
+                    recommendedSteps.map((step, idx) => (
+                      <div key={`step-${idx}`} className="flex items-start gap-2">
+                        <span className="shrink-0 font-semibold">{idx + 1}.</span>
+                        <span>{step}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-blue-800">No model-generated management recommendations available for this case yet.</div>
+                  )}
                 </CardContent>
               </Card>
 
