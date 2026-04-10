@@ -149,6 +149,19 @@ def _format_uptime(delta: timedelta) -> str:
     return f"{minutes}m"
 
 
+def _format_case_time_local(dt: Optional[datetime]) -> str:
+    if not dt:
+        return "00:00"
+
+    try:
+        # Keep naive datetimes as-is (already local in our dataset/seeding).
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            return dt.strftime("%H:%M")
+        return dt.astimezone().strftime("%H:%M")
+    except Exception:
+        return dt.strftime("%H:%M")
+
+
 def _active_users_count() -> int:
     now = datetime.utcnow()
     cutoff = now - timedelta(seconds=ACTIVE_USER_WINDOW_SECONDS)
@@ -1002,7 +1015,7 @@ def get_cases(history: Optional[bool] = False, status: Optional[str] = None, tri
             sex=c.sex,
             complaint=c.complaint,
             studyType=c.study_type,
-            timeReceived=c.time_received.strftime("%H:%M") if c.time_received else "00:00",
+            timeReceived=_format_case_time_local(c.time_received),
             aiStatus=c.ai_status,
             triageColor=c.triage_color,
             confidence=c.confidence,
@@ -1107,7 +1120,7 @@ def get_case(patient_id: str, db: Session = Depends(get_db)):
             sex=c.sex,
             complaint=c.complaint,
             studyType=c.study_type,
-            timeReceived=c.time_received.strftime("%H:%M") if c.time_received else "00:00",
+            timeReceived=_format_case_time_local(c.time_received),
             aiStatus=c.ai_status,
             triageColor=c.triage_color,
             confidence=c.confidence,
