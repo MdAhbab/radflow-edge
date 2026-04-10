@@ -131,17 +131,19 @@ class CheXagentAnalyzer:
 
     def analyze(self, crop_img, disease_hint, patient_context='', rag_context=''):
         pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
-        prompt = f'''You are a radiology assistant.
-Patient: {patient_context}
-CNN finding: {disease_hint}
-Guidelines: {rag_context}
+        prompt = f'''You are an expert radiology assistant.
+Patient clinical context: {patient_context}
+Suspected finding from CNN: {disease_hint}
+Clinical Guidelines: {rag_context}
 
-Analyze this X-ray region. Provide:
-FINDING: what you see
-CONFIRM: yes/no for {disease_hint}
-SEVERITY: mild/moderate/severe
-LOCATION: anatomical description
-ACTION: immediate recommendation'''
+Analyze this X-ray region and provide a comprehensive structured medical report. Ensure your response uses exactly these section headers:
+
+MEDICAL FINDINGS: Detailed anatomical observations what you see.
+CONFIRMATION & SEVERITY: confirm yes/no for {disease_hint} and severity (mild/moderate/severe).
+DIFFERENTIAL DIAGNOSIS: List of possible conditions (primary and secondary).
+RATIONALE: Your clinical reasoning linking the findings to the diagnosis.
+SAFETY & RISKS: Potential clinical risks, red flags, or missing information.
+NEXT STEPS: Recommended actions or follow-up imaging.'''
 
         inputs = self.processor(images=pil, text=prompt, return_tensors='pt')
         model_device = next(self.model.parameters()).device
