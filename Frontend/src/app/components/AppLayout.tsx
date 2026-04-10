@@ -268,7 +268,7 @@ export function AppLayout() {
                           transition-colors duration-150 relative
                           ${sidebarOpen ? "gap-3 px-3 py-2.5" : "justify-center px-0 py-2.5"}
                           ${active
-                            ? "bg-slate-900 text-white"
+                            ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20"
                             : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                           }`}
                       >
@@ -319,7 +319,7 @@ export function AppLayout() {
                           transition-colors duration-150
                           ${sidebarOpen ? "gap-3 px-3 py-2.5" : "justify-center px-0 py-2.5"}
                           ${active
-                            ? "bg-slate-900 text-white"
+                            ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20"
                             : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                           }`}
                       >

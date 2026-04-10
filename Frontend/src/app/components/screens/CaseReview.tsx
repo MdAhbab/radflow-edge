@@ -434,7 +434,7 @@ export function CaseReview() {
           </Button>
           <Button
             size="sm"
-            className="bg-slate-900 hover:bg-slate-800 h-8 text-xs px-3"
+            className="h-8 text-xs px-3"
             onClick={handleSaveToEHR}
             disabled={actionLoading}
           >

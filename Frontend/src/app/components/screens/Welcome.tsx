@@ -132,7 +132,7 @@ function PipelineStep({ number, icon, title, body, isLast }: PipelineStepProps) 
   return (
     <div className="flex flex-col items-center text-center relative flex-1 min-w-0 group">
       {!isLast && (
-        <div className="absolute top-5 left-[calc(50%+20px)] right-0 h-px bg-slate-800/80 z-0" />
+        <div className="absolute top-5 left-[calc(50%+20px)] right-0 h-px bg-gradient-to-r from-slate-800 via-slate-700 to-slate-800 z-0" />
       )}
       <div className="relative z-10 mb-3">
         <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-slate-900 border border-slate-800
@@ -180,6 +180,15 @@ export function Welcome() {
   const [scrolled, setScrolled] = useState(false);
   const [mission, setMission] = useState<SystemStatus | null>(null);
   
+  // Parallax state
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    const x = (e.clientX / window.innerWidth - 0.5) * 20;
+    const y = (e.clientY / window.innerHeight - 0.5) * 20;
+    setMousePos({ x, y });
+  };
+
   // Form state
   const [formData, setFormData] = useState({
     fullName: "", email: "", password: "", age: "", gender: "", profession: "", institute: "",
@@ -308,22 +317,22 @@ export function Welcome() {
           <div className="px-12 flex items-center justify-between">
             <a href="#" className="flex items-center gap-2 group">
               <div className="relative">
-                <Activity className="h-4 w-4 text-blue-400 group-hover:text-blue-300 transition-colors duration-200" />
-                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                <Activity className="h-5 w-5 text-blue-400 group-hover:text-blue-300 transition-colors duration-200" />
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
               </div>
-              <span className="font-bold text-white tracking-tight text-sm" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              <span className="font-bold text-white tracking-tight text-lg" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                 RadFlow<span className="text-blue-400">-Edge</span>
               </span>
             </a>
-            <nav className="flex items-center gap-6">
+            <nav className="flex items-center gap-8">
               {[
                 { href: "#about", label: "About" },
                 { href: "#features", label: "Features" },
                 { href: "#pipeline", label: "Pipeline" },
-                { href: "#nearby", label: "Resources", icon: <MapPin className="h-3 w-3" /> },
+                { href: "#nearby", label: "Resources", icon: <MapPin className="h-4 w-4" /> },
               ].map(({ href, label, icon }) => (
                 <a key={href} href={href}
-                  className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-200
+                  className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-200
                              transition-colors duration-200 relative group font-medium"
                 >
                   {icon}{label}
@@ -336,19 +345,33 @@ export function Welcome() {
         </header>
 
         {/* ── HERO ──────────────────────────────────────────────── */}
-        <section className="relative h-screen flex flex-col justify-between px-12 pt-20 pb-10 overflow-hidden">
-          <div className="absolute inset-0 -z-20 bg-cover bg-center bg-no-repeat"
-            style={{
-              backgroundImage: "url('https://images.unsplash.com/photo-1758574437870-f83c160efd82?fm=jpg&q=85&w=2400&auto=format&fit=crop')",
-              filter: "brightness(0.18) saturate(0.5)",
+        <section 
+          className="relative h-screen flex flex-col justify-between px-12 pt-20 pb-10 overflow-hidden"
+          onMouseMove={handleMouseMove}
+          style={{ perspective: "1000px" }}
+        >
+          <div 
+            className="absolute inset-0 -z-20 w-[110%] h-[110%] -left-[5%] -top-[5%] transition-transform duration-200 ease-out"
+            style={{ 
+              transform: `rotateY(${mousePos.x}deg) rotateX(${-mousePos.y}deg) translateZ(-50px)`,
             }}
-          />
+          >
+            <video 
+              src="/hero.mp4" 
+              autoPlay 
+              loop 
+              muted 
+              playsInline
+              className="w-full h-full object-cover opacity-60" 
+              style={{ filter: "saturate(0.8) contrast(1.2)" }} 
+            />
+          </div>
           <div className="absolute inset-0 -z-10 bg-gradient-to-b from-slate-950/80 via-slate-950/40 to-slate-950" />
 
           {/* Content */}
           <div className="flex flex-col justify-center flex-1 gap-5">
             <FadeIn delay={0}>
-              <h1 className="text-4xl xl:text-[2.75rem] font-bold text-white tracking-tight leading-[1.12]"
+              <h1 className="text-4xl xl:text-[3rem] font-extrabold text-white tracking-tighter leading-[1.1] drop-shadow-lg"
                 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
               >
                 Expert Radiology<br />
@@ -406,35 +429,35 @@ export function Welcome() {
         </section>
 
         {/* ── CAPABILITIES ──────────────────────────────────────── */}
-        <section id="features" className="bg-slate-950 px-12 py-10">
+        <section id="features" className="bg-slate-950 px-12 py-16">
           <Reveal>
-            <div className="flex items-center gap-3 mb-1">
-              <span className="text-[10px] font-semibold tracking-widest text-blue-400/80 uppercase">Capabilities</span>
+            <div className="flex items-center gap-4 mb-3">
+              <span className="text-xs font-bold tracking-[0.2em] text-blue-400/90 uppercase">Capabilities</span>
               <span className="flex-1 h-px bg-slate-800/70" />
             </div>
-            <h2 className="text-lg font-semibold text-white mb-6" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+            <h2 className="text-3xl font-bold text-white mb-12 tracking-tight" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
               Built for the clinic floor.{" "}
-              <span className="text-slate-600 font-normal">Not the conference room.</span>
+              <span className="text-slate-500 font-medium">Not the conference room.</span>
             </h2>
           </Reveal>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-6">
             {features.map((f, i) => (
               <Reveal key={f.index} delay={i * 60}>
-                <div className="group flex items-start gap-3 p-4 rounded-xl bg-slate-900/30 border border-slate-800/40
-                                hover:bg-slate-900/60 hover:border-slate-700/50 transition-all duration-300 cursor-default">
-                  <div className="mt-0.5 p-2 rounded-lg bg-blue-500/8 border border-blue-500/10 shrink-0
-                                  group-hover:bg-blue-500/12 group-hover:border-blue-500/20 transition-all duration-300">
-                    <div className="h-3.5 w-3.5 text-blue-400">{f.icon}</div>
+                <div className="group flex items-start gap-4 p-5 rounded-2xl bg-slate-900/40 backdrop-blur-md border border-slate-800/50
+                                hover:bg-slate-800/60 hover:border-blue-500/50 hover:shadow-[0_0_30px_rgba(59,130,246,0.15)] transition-all duration-300 cursor-default">
+                  <div className="mt-0.5 p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 shrink-0
+                                  group-hover:bg-blue-500/20 group-hover:border-blue-500/30 transition-all duration-300">
+                    <div className="h-4 w-4 text-blue-400">{f.icon}</div>
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <p className="text-sm font-medium text-slate-200 leading-snug">{f.title}</p>
-                      <span className="text-[10px] font-bold text-blue-400/70 bg-blue-500/8 px-1.5 py-0.5 rounded-md shrink-0">
+                    <div className="flex items-center gap-2 mb-2">
+                      <p className="text-base font-semibold text-slate-100 leading-snug">{f.title}</p>
+                      <span className="text-xs font-bold text-blue-400/90 bg-blue-500/10 px-2 py-0.5 rounded-md shrink-0">
                         {f.metric}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">{f.description}</p>
+                    <p className="text-sm text-slate-400 leading-relaxed font-medium">{f.description}</p>
                   </div>
                 </div>
               </Reveal>
@@ -443,15 +466,15 @@ export function Welcome() {
         </section>
 
         {/* ── PIPELINE ──────────────────────────────────────────── */}
-        <section id="pipeline" className="bg-[#05080f] px-12 py-10 border-t border-slate-800/40">
+        <section id="pipeline" className="bg-[#05080f] px-12 py-16 border-t border-slate-800/60">
           <Reveal>
-            <div className="flex items-center gap-3 mb-1">
-              <span className="text-[10px] font-semibold tracking-widest text-slate-500 uppercase">AI Pipeline</span>
+            <div className="flex items-center gap-4 mb-3">
+              <span className="text-xs font-bold tracking-[0.2em] text-slate-400 uppercase">AI Pipeline</span>
               <span className="flex-1 h-px bg-slate-800/70" />
             </div>
-            <h2 className="text-lg font-semibold text-white mb-8" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+            <h2 className="text-3xl font-bold text-white mb-16 tracking-tight" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
               Raw image to structured report.{" "}
-              <span className="text-slate-600 font-normal">Fully automated.</span>
+              <span className="text-slate-500 font-medium">Fully automated.</span>
             </h2>
           </Reveal>
 
@@ -461,11 +484,11 @@ export function Welcome() {
                 <PipelineStep key={step.number} {...step} isLast={i === pipelineSteps.length - 1} />
               ))}
             </div>
-            <div className="mt-8 flex items-center justify-center gap-3">
+            <div className="mt-12 flex items-center justify-center gap-4">
               {["Runs on-device", "No PHI leaves the facility", "< 30s end-to-end"].map((t, i) => (
                 <React.Fragment key={t}>
-                  {i > 0 && <span className="w-1 h-1 rounded-full bg-slate-800" />}
-                  <span className="text-[11px] text-slate-700">{t}</span>
+                  {i > 0 && <span className="w-1.5 h-1.5 rounded-full bg-slate-800" />}
+                  <span className="text-sm font-medium text-slate-500 tracking-wide">{t}</span>
                 </React.Fragment>
               ))}
             </div>
@@ -473,28 +496,28 @@ export function Welcome() {
         </section>
 
         {/* ── FOOTER ────────────────────────────────────────────── */}
-        <footer id="about" className="bg-slate-950 border-t border-slate-800/40 px-12 pt-8 pb-7">
+        <footer id="about" className="bg-slate-950 border-t border-slate-800/60 px-12 pt-16 pb-12">
           <Reveal>
-            <div className="grid grid-cols-3 gap-8 mb-7">
-              <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-12 mb-12">
+              <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  <Activity className="h-3.5 w-3.5 text-blue-400" />
-                  <span className="font-semibold text-slate-300 text-sm" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  <Activity className="h-5 w-5 text-blue-500" />
+                  <span className="font-bold text-slate-200 text-base tracking-tight" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                     RadFlow-Edge
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-600 leading-relaxed">
+                <p className="text-xs text-slate-500 leading-relaxed max-w-xs font-medium">
                   HSIL Hackathon 2026 — improving radiology access across rural Bangladesh.
                 </p>
-                <div className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80 animate-pulse" />
-                  <span className="text-[10px] text-slate-600">System Operational</span>
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)] animate-pulse" />
+                  <span className="text-xs font-medium text-slate-400">System Operational</span>
                 </div>
               </div>
 
-              <div id="nearby" className="space-y-3">
-                <h4 className="text-[10px] font-semibold uppercase tracking-widest text-slate-600">Resources</h4>
-                <ul className="space-y-2">
+              <div id="nearby" className="space-y-4">
+                <h4 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-600">Resources</h4>
+                <ul className="space-y-3">
                   {[
                     { label: "DGHS Bangladesh", href: "https://dghs.gov.bd/" },
                     { label: "WHO Bangladesh",  href: "https://www.who.int/bangladesh" },
@@ -502,38 +525,38 @@ export function Welcome() {
                   ].map(({ label, href }) => (
                     <li key={label}>
                       <a href={href} target="_blank" rel="noopener noreferrer"
-                        className="group flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300 transition-colors duration-200">
+                        className="group flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-300 transition-colors duration-200">
                         {label}
-                        <ExternalLink className="h-2.5 w-2.5 opacity-0 group-hover:opacity-60 transition-opacity duration-200" />
+                        <ExternalLink className="h-3 w-3 opacity-0 group-hover:opacity-60 transition-opacity duration-200" />
                       </a>
                     </li>
                   ))}
                 </ul>
               </div>
 
-              <div className="space-y-3">
-                <h4 className="text-[10px] font-semibold uppercase tracking-widest text-slate-600">Emergency</h4>
-                <ul className="space-y-2">
+              <div className="space-y-4">
+                <h4 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-600">Emergency</h4>
+                <ul className="space-y-3">
                   {[
-                    { label: "National Emergency", number: "999", icon: <PhoneCall className="h-3 w-3 text-slate-500" /> },
-                    { label: "Shastho Batayon",    number: "16263", icon: <HeartPulse className="h-3 w-3 text-slate-500" /> },
+                    { label: "National Emergency", number: "999", icon: <PhoneCall className="h-3.5 w-3.5 text-slate-500" /> },
+                    { label: "Shastho Batayon",    number: "16263", icon: <HeartPulse className="h-3.5 w-3.5 text-slate-500" /> },
                   ].map(({ label, number, icon }) => (
-                    <li key={label} className="flex items-center gap-2">
+                    <li key={label} className="flex items-center gap-2.5">
                       {icon}
-                      <span className="text-[11px] text-slate-500">{label}</span>
-                      <span className="text-[11px] font-bold text-slate-400 ml-auto">{number}</span>
+                      <span className="text-xs font-medium text-slate-500">{label}</span>
+                      <span className="text-xs font-bold text-slate-300 ml-auto">{number}</span>
                     </li>
                   ))}
                 </ul>
               </div>
             </div>
 
-            <div className="pt-5 border-t border-slate-800/40 flex items-center justify-between">
-              <p className="text-[11px] text-slate-700">&copy; 2026 RadFlow-Edge. All rights reserved.</p>
-              <div className="flex items-center gap-4">
+            <div className="pt-8 border-t border-slate-800/60 flex items-center justify-between">
+              <p className="text-xs font-medium text-slate-600">&copy; 2026 RadFlow-Edge. All rights reserved.</p>
+              <div className="flex items-center gap-6">
                 {["Terms", "Privacy", "Agreement"].map(t => (
                   <a key={t} href="#"
-                    className="text-[11px] text-slate-700 hover:text-slate-500 transition-colors duration-200">{t}</a>
+                    className="text-xs font-medium text-slate-600 hover:text-slate-400 transition-colors duration-200">{t}</a>
                 ))}
               </div>
             </div>
