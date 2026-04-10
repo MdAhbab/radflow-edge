@@ -45,9 +45,13 @@ export function Worklist() {
     noFindings: false,
   });
 
+  const isExactHighPriority = (value?: string): boolean =>
+    (value || "").trim().toLowerCase() === "high priority";
+
   const newCount = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing").length;
   const readyCount = cases.filter(c => c.aiStatus === "ready").length;
   const escalatedCount = cases.filter(c => c.aiStatus === "escalated").length;
+  const highPriorityCount = cases.filter((c) => isExactHighPriority(c.priority)).length;
 
   useEffect(() => {
     let mounted = true;
@@ -228,8 +232,8 @@ export function Worklist() {
             <div className="text-sm text-blue-700">Queue Cases</div>
           </div>
           <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <div className="text-2xl font-semibold text-red-900">{stats?.urgentCases || 0}</div>
-            <div className="text-sm text-red-700">Urgent Cases</div>
+            <div className="text-2xl font-semibold text-red-900">{highPriorityCount}</div>
+            <div className="text-sm text-red-700">High Priority Cases</div>
           </div>
           <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
             <div className="text-2xl font-semibold text-purple-900">{stats?.escalatedCases || 0}</div>
@@ -243,7 +247,7 @@ export function Worklist() {
             <TabsTrigger value="all">All Cases ({stats?.totalCases || 0})</TabsTrigger>
             <TabsTrigger value="new">New ({newCount})</TabsTrigger>
             <TabsTrigger value="ready">AI Ready ({readyCount})</TabsTrigger>
-            <TabsTrigger value="priority">High Priority ({stats?.urgentCases || 0})</TabsTrigger>
+            <TabsTrigger value="priority">High Priority ({highPriorityCount})</TabsTrigger>
             <TabsTrigger value="escalated">Escalated ({escalatedCount})</TabsTrigger>
           </TabsList>
         </Tabs>
@@ -333,7 +337,7 @@ export function Worklist() {
                 cases.filter(case_ => {
                   if (activeTab === "new") return case_.aiStatus === "ready" || case_.aiStatus === "analyzing";
                   if (activeTab === "ready") return case_.aiStatus === "ready";
-                  if (activeTab === "priority") return case_.priority === "High Priority" || case_.priority === "immediate" || case_.priority === "urgent";
+                  if (activeTab === "priority") return isExactHighPriority(case_.priority);
                   if (activeTab === "escalated") return case_.aiStatus === "escalated";
                   return true;
                 }).filter(case_ => {

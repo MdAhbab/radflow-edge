@@ -22,6 +22,7 @@ import { api, EscalationData, CaseData } from "../../../api";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { parseReportSections, summarizeForCard, toPercent } from "../../../reportSections";
 
 export function SpecialistReview() {
   const { patientId } = useParams();
@@ -113,11 +114,16 @@ export function SpecialistReview() {
   };
 
   const aiDraftReport = caseData?.aiDraftReport || "No AI draft report available for this case.";
-  const recommendedSteps = (caseData?.recommendedSteps || "")
+  const parsedReportSections = parseReportSections(caseData?.aiDraftReport);
+  const recommendedSteps = (caseData?.recommendedSteps || parsedReportSections.futureStepsPrecautions || "")
     .split(/\n+/)
     .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
     .filter((line) => line.length > 3)
     .slice(0, 6);
+  const keyFindingsForCard = summarizeForCard(
+    parsedReportSections.keyFindings || caseData?.complaint || "Clinical summary pending model output.",
+    240,
+  );
   const previousReport = historyReports
     .filter((r) => r.aiDraftReport && r.timeReceived !== caseData?.timeReceived)
     .sort((a, b) => (b.timeReceived || "").localeCompare(a.timeReceived || ""))[0];
@@ -354,12 +360,12 @@ export function SpecialistReview() {
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-blue-700">Confidence</span>
                     <span className="text-lg font-semibold text-blue-900">
-                      {Math.round((escalation.confidence || 0) * (escalation.confidence <= 1 ? 100 : 1))}%
+                      {toPercent(escalation.confidence || 0)}
                     </span>
                   </div>
                   <div className="pt-2 border-t border-blue-200">
                     <p className="text-xs text-blue-800 leading-relaxed">
-                      {caseData?.aiDraftReport || "AI analysis context will appear here after model processing."}
+                      {keyFindingsForCard || "AI analysis context will appear here after model processing."}
                     </p>
                   </div>
                 </CardContent>
@@ -477,13 +483,39 @@ export function SpecialistReview() {
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-sm font-medium">AI Draft Report</CardTitle>
                     <Badge variant="outline" className="bg-slate-100 text-slate-700">
-                      Confidence: {Math.round((escalation.confidence || 0) * (escalation.confidence <= 1 ? 100 : 1))}%
+                      Confidence: {toPercent(escalation.confidence || 0)}
                     </Badge>
                   </div>
                 </CardHeader>
                 <CardContent>
                   <div className="text-sm space-y-3 text-slate-700 leading-relaxed">
-                    <div className="whitespace-pre-wrap">{aiDraftReport}</div>
+                    {parsedReportSections.keyFindings && (
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Key Findings</div>
+                        <div className="whitespace-pre-wrap">{parsedReportSections.keyFindings}</div>
+                      </div>
+                    )}
+                    {parsedReportSections.differentialDiagnostics && (
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Differential Diagnostics</div>
+                        <div className="whitespace-pre-wrap">{parsedReportSections.differentialDiagnostics}</div>
+                      </div>
+                    )}
+                    {parsedReportSections.futureStepsPrecautions && (
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Future Steps and Precautions</div>
+                        <div className="whitespace-pre-wrap">{parsedReportSections.futureStepsPrecautions}</div>
+                      </div>
+                    )}
+                    {parsedReportSections.modelNarrative && (
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Model Narrative</div>
+                        <div className="whitespace-pre-wrap">{summarizeForCard(parsedReportSections.modelNarrative, 380)}</div>
+                      </div>
+                    )}
+                    {!parsedReportSections.keyFindings && !parsedReportSections.differentialDiagnostics && !parsedReportSections.futureStepsPrecautions && (
+                      <div className="whitespace-pre-wrap">{aiDraftReport}</div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
