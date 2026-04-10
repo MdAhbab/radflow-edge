@@ -43,6 +43,7 @@ export function CaseReview() {
   const [zoom, setZoom] = useState(100);
   const [showAnnotations, setShowAnnotations] = useState(true);
   const [findings, setFindings] = useState<FindingData[]>([]);
+  const [latestLedger, setLatestLedger] = useState<any | null>(null);
   const [findingsLoading, setFindingsLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -82,6 +83,19 @@ export function CaseReview() {
     };
     fetchCase();
   }, [patientId]);
+
+  useEffect(() => {
+    if (!patientId) return;
+    const fetchLedger = async () => {
+      try {
+        const rows = await api.getInferenceLedger(patientId, 1);
+        setLatestLedger(rows[0] || null);
+      } catch {
+        setLatestLedger(null);
+      }
+    };
+    fetchLedger();
+  }, [patientId, findings]);
 
   useEffect(() => {
     if (!patientId || !caseData) return;
@@ -301,6 +315,47 @@ export function CaseReview() {
     }
   };
 
+  const runDualConsensus = async () => {
+    if (!patientId || !caseData?.imagePath) return;
+    setActionLoading(true);
+    try {
+      const job = await api.createAnalyzeJob({
+        patientId,
+        imagePath: caseData.imagePath,
+        patientContext: `${caseData.age}${caseData.sex}, complaint: ${caseData.complaint}`,
+        forceConsensus: true,
+        userAction: "consensus_review",
+      });
+
+      let final = job;
+      for (let i = 0; i < 60; i += 1) {
+        if (["completed", "failed", "cancelled"].includes(final.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        final = await api.getAnalyzeJob(job.jobId);
+      }
+
+      if (final.status === "completed") {
+        toast.success("Dual-pipeline consensus run completed.");
+        const [updatedCase, updatedFindings, ledgerRows] = await Promise.all([
+          api.getCase(patientId),
+          api.getFindings(patientId),
+          api.getInferenceLedger(patientId, 1),
+        ]);
+        setCaseData(updatedCase);
+        setFindings(updatedFindings.sort((a, b) => (b.confidence || 0) - (a.confidence || 0)));
+        setLatestLedger(ledgerRows[0] || null);
+      } else if (final.status === "failed") {
+        toast.error(final.errorMessage || "Consensus job failed.");
+      } else {
+        toast.warning("Consensus job did not finish in time. Check System Status for job progress.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to run consensus");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="h-full flex flex-col items-center justify-center bg-slate-50">
@@ -354,6 +409,10 @@ export function CaseReview() {
             <Button variant="outline" onClick={handleEscalate} disabled={actionLoading}>
               <TrendingUp className="h-4 w-4 mr-2" />
               Escalate to Specialist
+            </Button>
+            <Button variant="outline" onClick={runDualConsensus} disabled={actionLoading}>
+              {actionLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Activity className="h-4 w-4 mr-2" />}
+              Run Dual Consensus
             </Button>
             <Button className="bg-slate-900 hover:bg-slate-800" onClick={handleSaveToEHR} disabled={actionLoading}>
               {actionLoading ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileText className="h-4 w-4 mr-2" />}
@@ -718,6 +777,60 @@ export function CaseReview() {
                         <p className="text-sm text-slate-500 italic">Confidence will appear once AI output is available.</p>
                       )}
                     </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium">Model Consensus</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {latestLedger ? (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-600">Consensus State</span>
+                        <Badge variant={latestLedger.consensusState === "disagree" ? "destructive" : "outline"}>
+                          {latestLedger.consensusState || "not_run"}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-600">Risk Band</span>
+                        <Badge variant="outline">{latestLedger.riskBand || "low"}</Badge>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-600">Calibrated Confidence</span>
+                        <span className="font-semibold text-slate-900">{Math.round((latestLedger.calibratedConfidence || 0) * 100)}%</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-slate-500 italic">No ledger entry yet for this case.</div>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm font-medium">Rationale & Safety</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                  {latestLedger ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Uncertainty</span>
+                        <span>{Math.round((latestLedger.uncertainty || 0) * 100)}%</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Expected Error Bin</span>
+                        <span className="capitalize">{latestLedger.expectedErrorBin || "n/a"}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">Policy Action</span>
+                        <span className="capitalize">{latestLedger.policyAction || "no_change"}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-slate-500 italic">Run analysis to populate rationale details.</div>
                   )}
                 </CardContent>
               </Card>

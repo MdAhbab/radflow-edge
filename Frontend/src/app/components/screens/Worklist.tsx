@@ -38,6 +38,12 @@ export function Worklist() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [quickFilters, setQuickFilters] = useState({
+    lowConfidence: false,
+    highUncertainty: false,
+    disagreement: false,
+    noFindings: false,
+  });
 
   const newCount = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing").length;
   const readyCount = cases.filter(c => c.aiStatus === "ready").length;
@@ -147,6 +153,56 @@ export function Worklist() {
     return <span className={`font-medium ${color}`}>{value}%</span>;
   };
 
+  const parseTimeToDate = (timeStr: string): Date | null => {
+    if (!timeStr) return null;
+    const [hRaw, mRaw] = timeStr.split(":");
+    const h = Number(hRaw);
+    const m = Number(mRaw);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    const now = new Date();
+    const d = new Date(now);
+    d.setHours(h, m, 0, 0);
+    if (d.getTime() > now.getTime() + 10 * 60 * 1000) {
+      d.setDate(d.getDate() - 1);
+    }
+    return d;
+  };
+
+  const slaMinutes = (c: CaseData): number => {
+    const triage = (c.triageColor || "").toLowerCase();
+    if (triage === "red") return 15;
+    if (triage === "orange") return 30;
+    if (triage === "yellow") return 60;
+    return 120;
+  };
+
+  const slaStatus = (c: CaseData): string => {
+    const start = parseTimeToDate(c.timeReceived);
+    if (!start) return "--";
+    const elapsed = Math.max(0, Math.floor((Date.now() - start.getTime()) / 60000));
+    const remaining = slaMinutes(c) - elapsed;
+    return remaining <= 0 ? `Overdue ${Math.abs(remaining)}m` : `${remaining}m left`;
+  };
+
+  const confidenceTrendSparkline = (patientId: string): string => {
+    const history = cases
+      .filter((c) => c.patientId === patientId)
+      .map((c) => c.confidence <= 1 ? c.confidence * 100 : c.confidence)
+      .slice(-6);
+    if (history.length <= 1) {
+      const single = Math.round(history[0] || 0);
+      return single === 0 ? "-" : "▁";
+    }
+    const levels = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    const max = Math.max(...history, 1);
+    return history
+      .map((v) => {
+        const idx = Math.max(0, Math.min(levels.length - 1, Math.round((v / max) * (levels.length - 1))));
+        return levels[idx];
+      })
+      .join("");
+  };
+
   return (
     <div className="h-full flex flex-col bg-slate-50">
       {/* Header */}
@@ -215,6 +271,29 @@ export function Worklist() {
             </SelectContent>
           </Select>
         </div>
+
+        <div className="flex flex-wrap gap-2">
+          {[
+            { key: "lowConfidence", label: "Low Confidence" },
+            { key: "highUncertainty", label: "High Uncertainty" },
+            { key: "disagreement", label: "Disagreement" },
+            { key: "noFindings", label: "No Findings" },
+          ].map((chip) => (
+            <Button
+              key={chip.key}
+              size="sm"
+              variant={quickFilters[chip.key as keyof typeof quickFilters] ? "default" : "outline"}
+              onClick={() =>
+                setQuickFilters((prev) => ({
+                  ...prev,
+                  [chip.key]: !prev[chip.key as keyof typeof quickFilters],
+                }))
+              }
+            >
+              {chip.label}
+            </Button>
+          ))}
+        </div>
       </div>
 
       {/* Cases Table */}
@@ -231,20 +310,22 @@ export function Worklist() {
                 <TableHead>Time</TableHead>
                 <TableHead>AI Status</TableHead>
                 <TableHead>Triage</TableHead>
+                <TableHead>SLA</TableHead>
                 <TableHead className="text-right">Confidence</TableHead>
+                <TableHead>Trend</TableHead>
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8">
+                  <TableCell colSpan={12} className="text-center py-8">
                     <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto" />
                   </TableCell>
                 </TableRow>
               ) : error ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="text-center py-8 text-red-600">
+                  <TableCell colSpan={12} className="text-center py-8 text-red-600">
                     {error}
                   </TableCell>
                 </TableRow>
@@ -261,6 +342,13 @@ export function Worklist() {
                   return case_.patientId.toLowerCase().includes(query) ||
                          case_.name.toLowerCase().includes(query) ||
                          case_.complaint.toLowerCase().includes(query);
+                }).filter(case_ => {
+                  const conf = case_.confidence <= 1 ? case_.confidence * 100 : case_.confidence;
+                  if (quickFilters.lowConfidence && conf >= 35) return false;
+                  if (quickFilters.highUncertainty && conf > 60) return false;
+                  if (quickFilters.disagreement && !(case_.aiDraftReport || "").toLowerCase().includes("consensus_disagreement")) return false;
+                  if (quickFilters.noFindings && conf > 0) return false;
+                  return true;
                 }).map((case_) => (
                   <TableRow key={case_.patientId} className="group">
                   <TableCell className="font-mono text-sm">{case_.patientId}</TableCell>
@@ -282,9 +370,11 @@ export function Worklist() {
                   </TableCell>
                   <TableCell>{getAIStatusBadge(case_.aiStatus)}</TableCell>
                   <TableCell>{getTriageBadge(case_.triageColor, case_.priority)}</TableCell>
+                  <TableCell className="text-sm text-slate-600">{slaStatus(case_)}</TableCell>
                   <TableCell className="text-right">
                     {getConfidenceBadge(case_.confidence)}
                   </TableCell>
+                  <TableCell className="font-mono text-sm text-slate-600">{confidenceTrendSparkline(case_.patientId)}</TableCell>
                   <TableCell className="text-right">
                     <Link to={`/dashboard/case/${case_.patientId}`}>
                       <Button 

@@ -21,6 +21,7 @@ export function AppLayout() {
   const [activeCaseId, setActiveCaseId] = useState<string>("");
   const [stats, setStats] = useState({ worklist: 0, escalations: 0 });
   const [isOffline, setIsOffline] = useState(false);
+  const [now, setNow] = useState<Date>(new Date());
 
   useEffect(() => {
     const fetchSidebarData = async () => {
@@ -65,6 +66,11 @@ export function AppLayout() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const ticker = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(ticker);
+  }, []);
+
   const navItems = [
     { path: "/dashboard", label: "Worklist", icon: ListTodo },
     { path: `/dashboard/case/${activeCaseId}`, label: "Cases", icon: FileText },
@@ -79,13 +85,13 @@ export function AppLayout() {
     return location.pathname.startsWith(path.replace(/#.*/, ""));
   };
 
-  const currentTime = new Date().toLocaleTimeString('en-US', { 
-    hour: '2-digit', 
+  const currentTime = now.toLocaleTimeString(undefined, {
+    hour: '2-digit',
     minute: '2-digit',
-    hour12: false 
+    hour12: true,
   });
   
-  const currentDate = new Date().toLocaleDateString('en-US', { 
+  const currentDate = now.toLocaleDateString('en-US', {
     weekday: 'short',
     month: 'short', 
     day: 'numeric',

@@ -9,10 +9,23 @@ import {
   AlertTriangle,
   Play,
   Shield,
-  Loader2
+  Loader2,
+  BarChart3,
+  RefreshCcw,
+  ListChecks,
+  AlertCircle
 } from "lucide-react";
-import { api, SystemStatus as SystemStatusType } from "../../../api";
+import {
+  api,
+  SystemStatus as SystemStatusType,
+  AnalyzeJobStatus,
+  ObservabilitySnapshot,
+  DriftReport,
+  OfflineQueueItem,
+  RecycleBinItem,
+} from "../../../api";
 import { toast } from "sonner";
+import { Button } from "../ui/button";
 
 export function SystemStatus() {
   const [status, setStatus] = useState<SystemStatusType | null>(null);
@@ -20,13 +33,30 @@ export function SystemStatus() {
   const [error, setError] = useState<string | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
+  const [jobs, setJobs] = useState<AnalyzeJobStatus[]>([]);
+  const [observability, setObservability] = useState<ObservabilitySnapshot | null>(null);
+  const [driftReport, setDriftReport] = useState<DriftReport | null>(null);
+  const [offlineQueue, setOfflineQueue] = useState<OfflineQueueItem[]>([]);
+  const [replayingQueue, setReplayingQueue] = useState(false);
+  const [recycleItems, setRecycleItems] = useState<RecycleBinItem[]>([]);
 
   useEffect(() => {
     const fetchStatus = async () => {
       setLoading(true);
       try {
-        const data = await api.getSystemStatus();
+        const [data, obs, drift, recentJobs, recycle] = await Promise.all([
+          api.getSystemStatus(),
+          api.getObservability(),
+          api.getDriftReport(),
+          api.listAnalyzeJobs(15),
+          api.getRecycleBin(),
+        ]);
         setStatus(data);
+        setObservability(obs);
+        setDriftReport(drift);
+        setJobs(recentJobs);
+        setRecycleItems(recycle);
+        setOfflineQueue(api.getOfflineQueue());
         setLastFetchedAt(new Date());
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load system status");
@@ -60,6 +90,21 @@ export function SystemStatus() {
   }
 
   if (!status) return null;
+
+  const endpointRows = Object.entries(observability?.endpoints || {}).sort((a, b) => b[1].count - a[1].count).slice(0, 8);
+
+  const replayOfflineQueue = async () => {
+    setReplayingQueue(true);
+    try {
+      const result = await api.replayOfflineQueue();
+      setOfflineQueue(api.getOfflineQueue());
+      toast.success(`Replay done: ${result.replayed} replayed, ${result.failed} failed, ${result.remaining} remaining.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to replay offline queue");
+    } finally {
+      setReplayingQueue(false);
+    }
+  };
 
   return (
     <div className="h-full flex flex-col bg-slate-50 overflow-auto">
@@ -266,6 +311,133 @@ export function SystemStatus() {
                 ))}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Sophistication Console */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-5 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-slate-500" /> Endpoint Reliability (SLO)
+              </h3>
+            </div>
+            <div className="p-0">
+              <table className="w-full text-left">
+                <thead className="bg-slate-50/50 border-b border-slate-100">
+                  <tr>
+                    <th className="px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Endpoint</th>
+                    <th className="px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Calls</th>
+                    <th className="px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Errors</th>
+                    <th className="px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Avg ms</th>
+                    <th className="px-5 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">P95 ms</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {endpointRows.length === 0 ? (
+                    <tr>
+                      <td className="px-5 py-4 text-sm text-slate-500" colSpan={5}>No endpoint telemetry available yet.</td>
+                    </tr>
+                  ) : endpointRows.map(([endpoint, metric]) => (
+                    <tr key={endpoint} className="hover:bg-slate-50/50 transition-colors">
+                      <td className="px-5 py-4 text-sm font-mono text-slate-800">{endpoint}</td>
+                      <td className="px-5 py-4 text-sm text-slate-700">{metric.count}</td>
+                      <td className="px-5 py-4 text-sm text-slate-700">{metric.errors}</td>
+                      <td className="px-5 py-4 text-sm text-slate-700">{metric.avgMs}</td>
+                      <td className="px-5 py-4 text-sm text-slate-700">{metric.p95Ms}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+              <h3 className="font-semibold text-slate-900 text-lg mb-4 flex items-center gap-2">
+                <ListChecks className="w-4 h-4 text-slate-500" /> Async Inference Jobs
+              </h3>
+              <div className="space-y-2 max-h-64 overflow-auto">
+                {jobs.length === 0 ? (
+                  <div className="text-sm text-slate-500">No async jobs yet.</div>
+                ) : jobs.map((job) => (
+                  <div key={job.jobId} className="rounded-md border border-slate-200 p-2 text-xs">
+                    <div className="font-mono text-slate-700 truncate">{job.jobId}</div>
+                    <div className="flex justify-between mt-1">
+                      <span className="capitalize">{job.status}</span>
+                      <span>{job.progress}%</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+              <h3 className="font-semibold text-slate-900 text-lg mb-4">Offline Replay Queue</h3>
+              <div className="text-sm text-slate-600 mb-3">Pending items: {offlineQueue.length}</div>
+              <Button className="w-full" variant="outline" onClick={replayOfflineQueue} disabled={replayingQueue || offlineQueue.length === 0}>
+                {replayingQueue ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCcw className="h-4 w-4 mr-2" />}
+                Replay Queue
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <h3 className="font-semibold text-slate-900 text-lg mb-4">Model Warm State</h3>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span>Experiment 1 Detector</span><span>{status.model_warm_state?.exp1_detector ? "Warm" : "Cold"}</span></div>
+              <div className="flex justify-between"><span>Experiment 1 Analyzer</span><span>{status.model_warm_state?.exp1_analyzer ? "Warm" : "Cold"}</span></div>
+              <div className="flex justify-between"><span>Experiment 2 Preprocessor</span><span>{status.model_warm_state?.exp2_preprocessor ? "Warm" : "Cold"}</span></div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <h3 className="font-semibold text-slate-900 text-lg mb-4">Queue Depth by Stage</h3>
+            <div className="space-y-2 text-sm">
+              {Object.entries(status.queue_stage_depth || {}).map(([k, v]) => (
+                <div key={k} className="flex justify-between"><span className="capitalize">{k}</span><span>{v}</span></div>
+              ))}
+              <div className="flex justify-between text-amber-700"><span>Retry Count</span><span>{status.retry_count || 0}</span></div>
+              <div className="flex justify-between text-red-700"><span>Failed Jobs</span><span>{status.failed_jobs || 0}</span></div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <h3 className="font-semibold text-slate-900 text-lg mb-4">Drift Monitoring</h3>
+            {driftReport ? (
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between"><span>Recent Runs (7d)</span><span>{driftReport.recentCount}</span></div>
+                <div className="flex justify-between"><span>Baseline Runs</span><span>{driftReport.baselineCount}</span></div>
+                <div className="flex justify-between"><span>Confidence Drift</span><span>{driftReport.confidenceDrift}</span></div>
+                <div className="flex justify-between"><span>Low Quality Rate</span><span>{Math.round(driftReport.recentLowQualityRate * 100)}%</span></div>
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500 flex items-center gap-2"><AlertCircle className="h-4 w-4" />No drift report yet</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+          <h3 className="font-semibold text-slate-900 text-lg mb-4">Recycle Bin Preview</h3>
+          <div className="space-y-2 max-h-52 overflow-auto">
+            {recycleItems.length === 0 ? (
+              <div className="text-sm text-slate-500">No deleted patient histories.</div>
+            ) : recycleItems.slice(0, 12).map((item) => {
+              const deletedAt = item.deletedAt ? new Date(item.deletedAt) : null;
+              const retentionDays = 30;
+              const daysRemaining = deletedAt
+                ? Math.max(0, retentionDays - Math.floor((Date.now() - deletedAt.getTime()) / (1000 * 60 * 60 * 24)))
+                : retentionDays;
+              return (
+                <div key={item.patientId} className="rounded border border-amber-200 bg-amber-50 p-2 text-sm">
+                  <div className="font-medium text-amber-900">{item.patientId}</div>
+                  <div className="text-amber-800 text-xs">{item.caseCount} cases, {item.escalationCount} escalations</div>
+                  <div className="text-amber-700 text-xs">Retention: {daysRemaining} day(s) remaining</div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
