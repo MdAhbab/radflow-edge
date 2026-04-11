@@ -967,6 +967,7 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": [int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])],
                 "report": None,
+                "source_engine": "experiment1",
             }
         )
 
@@ -977,6 +978,7 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": None,
                 "report": None,
+                "source_engine": "experiment1",
             }
         )
 
@@ -1213,6 +1215,7 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
                 "confidence": float(confidence),
                 "bbox": [int(resolved_bbox[0]), int(resolved_bbox[1]), int(resolved_bbox[2]), int(resolved_bbox[3])],
                 "report": report,
+                "source_engine": "experiment2",
             }
         )
 
@@ -1415,6 +1418,7 @@ def _apply_analysis_to_case(db_case: Case, analysis: Dict[str, Any], db: Session
                 bbox_x2=bbox[2],
                 bbox_y2=bbox[3],
                 report=f.get("report"),
+                source_engine=f.get("source_engine"),
             )
         )
 
@@ -1440,6 +1444,7 @@ def _bootstrap_legacy_finding_if_possible(db_case: Case, db: Session) -> bool:
             bbox_x2=None,
             bbox_y2=None,
             report=db_case.ai_draft_report,
+            source_engine=None,
         )
     )
     db.commit()
@@ -1480,6 +1485,7 @@ def _ensure_findings_for_case(patient_id: str, db: Session) -> List[Finding]:
                         bbox_x2=None,
                         bbox_y2=None,
                         report=str(analysis.get("aiDraftReport") or previous_report or ""),
+                        source_engine=str(analysis.get("engine") or "") or None,
                     )
                 )
                 db.commit()
@@ -1636,6 +1642,7 @@ class FindingSchema(BaseModel):
     bbox_y2: Optional[int] = None
     report: Optional[str] = None
     severity: Optional[str] = None
+    source_engine: Optional[str] = None
 
 
 class LegacyReanalyzeRequest(BaseModel):
@@ -2012,6 +2019,24 @@ def get_system_status(db: Session = Depends(get_db)):
         "queue_stage_depth": async_job_counts,
         "retry_count": retry_count,
         "failed_jobs": failed_jobs,
+    }
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "service": "hsil-backend",
+        "active_model": active_ai_model,
+    }
+
+
+@app.get("/api/v1/health")
+def api_health_check():
+    return {
+        "status": "ok",
+        "service": "hsil-backend",
+        "active_model": active_ai_model,
     }
 
 @app.get("/api/v1/system/model")

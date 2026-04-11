@@ -38,6 +38,17 @@ interface ParsedCopilotSection {
   bullets: string[];
 }
 
+interface ImageLayoutState {
+  naturalW: number;
+  naturalH: number;
+  displayW: number;
+  displayH: number;
+  offsetX: number;
+  offsetY: number;
+  frameW: number;
+  frameH: number;
+}
+
 export function CaseReview() {
   const IMAGE_FRAME_WIDTH = 500;
   const IMAGE_FRAME_HEIGHT = 600;
@@ -57,17 +68,35 @@ export function CaseReview() {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(true);
-    const pendingPatchRef = useRef<Partial<CaseData>>({});
+  const [activeModel, setActiveModel] = useState("experiment1");
+  const [consensusTriggered, setConsensusTriggered] = useState(false);
+  const pendingPatchRef = useRef<Partial<CaseData>>({});
   const saveTimerRef = useRef<number | null>(null);
   const [autosaveState, setAutosaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [imageLayout, setImageLayout] = useState({
+  const [exp1ImageLayout, setExp1ImageLayout] = useState<ImageLayoutState>({
     naturalW: IMAGE_FRAME_WIDTH,
     naturalH: IMAGE_FRAME_HEIGHT,
     displayW: IMAGE_FRAME_WIDTH,
     displayH: IMAGE_FRAME_HEIGHT,
     offsetX: 0,
     offsetY: 0,
+    frameW: IMAGE_FRAME_WIDTH,
+    frameH: IMAGE_FRAME_HEIGHT,
   });
+  const [exp2ImageLayout, setExp2ImageLayout] = useState<ImageLayoutState>({
+    naturalW: IMAGE_FRAME_WIDTH,
+    naturalH: IMAGE_FRAME_HEIGHT,
+    displayW: IMAGE_FRAME_WIDTH,
+    displayH: IMAGE_FRAME_HEIGHT,
+    offsetX: 0,
+    offsetY: 0,
+    frameW: IMAGE_FRAME_WIDTH,
+    frameH: IMAGE_FRAME_HEIGHT,
+  });
+  const exp1FrameRef = useRef<HTMLDivElement | null>(null);
+  const exp2FrameRef = useRef<HTMLDivElement | null>(null);
+  const exp1ImageRef = useRef<HTMLImageElement | null>(null);
+  const exp2ImageRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     if (!patientId) return;
@@ -75,13 +104,15 @@ export function CaseReview() {
     const fetchCase = async () => {
       setLoading(true);
       try {
-        const [data, findingsData] = await Promise.all([
+        const [data, findingsData, modelId] = await Promise.all([
           api.getCase(patientId),
           api.getFindings(patientId),
+          api.getAiModel().catch(() => "experiment1"),
         ]);
         setCaseData(data);
         const sorted = [...findingsData].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
         setFindings(sorted);
+        setActiveModel((modelId || "experiment1").toLowerCase());
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load case");
       } finally {
@@ -103,6 +134,11 @@ export function CaseReview() {
     };
     fetchLedger();
   }, [patientId, findings]);
+
+  useEffect(() => {
+    const consensusState = String(latestLedger?.consensusState || "").toLowerCase();
+    setConsensusTriggered(Boolean(consensusState && consensusState !== "not_run"));
+  }, [latestLedger]);
 
   useEffect(() => {
     if (!patientId || !caseData) return;
@@ -295,17 +331,59 @@ export function CaseReview() {
     }
   };
 
-  const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
+  const updateLayoutForFrame = (
+    img: HTMLImageElement | null,
+    frame: HTMLDivElement | null,
+    setter: React.Dispatch<React.SetStateAction<ImageLayoutState>>,
+  ) => {
+    if (!img || !frame) return;
+
+    const frameW = Math.max(1, frame.clientWidth || IMAGE_FRAME_WIDTH);
+    const frameH = Math.max(1, frame.clientHeight || IMAGE_FRAME_HEIGHT);
     const naturalW = img.naturalWidth || IMAGE_FRAME_WIDTH;
     const naturalH = img.naturalHeight || IMAGE_FRAME_HEIGHT;
-    const scale = Math.min(IMAGE_FRAME_WIDTH / naturalW, IMAGE_FRAME_HEIGHT / naturalH);
+    const scale = Math.min(frameW / naturalW, frameH / naturalH);
     const displayW = naturalW * scale;
     const displayH = naturalH * scale;
-    const offsetX = (IMAGE_FRAME_WIDTH - displayW) / 2;
-    const offsetY = (IMAGE_FRAME_HEIGHT - displayH) / 2;
-    setImageLayout({ naturalW, naturalH, displayW, displayH, offsetX, offsetY });
+    const offsetX = (frameW - displayW) / 2;
+    const offsetY = (frameH - displayH) / 2;
+
+    setter({ naturalW, naturalH, displayW, displayH, offsetX, offsetY, frameW, frameH });
   };
+
+  const handleExp1ImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    exp1ImageRef.current = img;
+    updateLayoutForFrame(img, exp1FrameRef.current, setExp1ImageLayout);
+  };
+
+  const handleExp2ImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    exp2ImageRef.current = img;
+    updateLayoutForFrame(img, exp2FrameRef.current, setExp2ImageLayout);
+  };
+
+  useEffect(() => {
+    const recalcLayouts = () => {
+      updateLayoutForFrame(exp1ImageRef.current, exp1FrameRef.current, setExp1ImageLayout);
+      updateLayoutForFrame(exp2ImageRef.current, exp2FrameRef.current, setExp2ImageLayout);
+    };
+
+    recalcLayouts();
+    window.addEventListener("resize", recalcLayouts);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(recalcLayouts);
+      if (exp1FrameRef.current) resizeObserver.observe(exp1FrameRef.current);
+      if (exp2FrameRef.current) resizeObserver.observe(exp2FrameRef.current);
+    }
+
+    return () => {
+      window.removeEventListener("resize", recalcLayouts);
+      resizeObserver?.disconnect();
+    };
+  }, []);
 
   const annotationFindings = findings.filter(
     (f) =>
@@ -316,7 +394,37 @@ export function CaseReview() {
   );
   const exp1Annotations = annotationFindings.filter(f => f.source_engine !== "experiment2");
   const exp2Annotations = annotationFindings.filter(f => f.source_engine === "experiment2");
-  const isDualView = findings.some(f => f.source_engine === "experiment2") || latestLedger != null;
+  const showDualOutput = activeModel === "both" || consensusTriggered;
+
+  const getReportForEngine = (engineId: "experiment1" | "experiment2") => {
+    return findings
+      .find((f) => f.source_engine === engineId && typeof f.report === "string" && f.report.trim().length > 0)
+      ?.report
+      ?.trim();
+  };
+
+  const exp1Report = getReportForEngine("experiment1");
+  const exp2Report = getReportForEngine("experiment2");
+  const singleReport = caseData?.aiDraftReport || exp1Report || "AI Draft Report has not been generated for this case.";
+
+  const getOverlayStyle = (finding: FindingData, layout: ImageLayoutState) => {
+    const x1 = finding.bbox_x1 as number;
+    const y1 = finding.bbox_y1 as number;
+    const x2 = finding.bbox_x2 as number;
+    const y2 = finding.bbox_y2 as number;
+
+    const rawLeft = layout.offsetX + (x1 / layout.naturalW) * layout.displayW;
+    const rawTop = layout.offsetY + (y1 / layout.naturalH) * layout.displayH;
+    const rawWidth = Math.max(12, ((x2 - x1) / layout.naturalW) * layout.displayW);
+    const rawHeight = Math.max(12, ((y2 - y1) / layout.naturalH) * layout.displayH);
+
+    const left = Math.max(0, Math.min(layout.frameW - 12, rawLeft));
+    const top = Math.max(0, Math.min(layout.frameH - 12, rawTop));
+    const width = Math.max(12, Math.min(layout.frameW - left, rawWidth));
+    const height = Math.max(12, Math.min(layout.frameH - top, rawHeight));
+
+    return { left, top, width, height };
+  };
 
 
   const handleIsolate = async () => {
@@ -443,6 +551,7 @@ export function CaseReview() {
         setCaseData(updatedCase);
         setFindings(updatedFindings.sort((a, b) => (b.confidence || 0) - (a.confidence || 0)));
         setLatestLedger(ledgerRows[0] || null);
+        setConsensusTriggered(true);
       } else if (final.status === "failed") {
         toast.error(final.errorMessage || "Consensus job failed.");
       } else {
@@ -727,7 +836,7 @@ export function CaseReview() {
         </div>
 
         {/* Center Panel - Image Viewer */}
-        <div className="flex-1 flex flex-col bg-slate-900 relative">
+        <div className="flex-1 min-w-0 flex flex-col bg-slate-900 relative overflow-hidden">
           {/* Image Controls */}
           <div className="absolute top-4 left-4 z-10 flex gap-2">
             <Button 
@@ -762,13 +871,19 @@ export function CaseReview() {
           </div>
 
           {/* X-Ray Image */}
-          <div className="flex-1 flex items-center justify-center p-8 overflow-auto">
-            <div className="relative flex flex-col xl:flex-row gap-8" style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}>
+          <div className="flex-1 flex items-center justify-center p-4 xl:p-6 overflow-auto">
+            <div
+              className="relative flex w-full max-w-full items-center justify-center gap-6 flex-col 2xl:flex-row"
+              style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top center" }}
+            >
               
               {/* Image 1 - Exp 1 */}
-              <div className="flex flex-col items-center gap-2">
-                {isDualView && <h3 className="text-slate-300 font-medium text-sm">Experiment 1 (Detector & Analyzer)</h3>}
-                <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl">
+              <div className="flex w-full max-w-[520px] flex-col items-center gap-2 shrink-0">
+                {showDualOutput && <h3 className="text-slate-300 font-medium text-sm">Experiment 1 (Detector & Analyzer)</h3>}
+                <div
+                  ref={exp1FrameRef}
+                  className="w-full max-w-[500px] aspect-[5/6] min-h-[360px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl"
+                >
                   {/* Simulated X-ray gradient */}
                   <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
                   
@@ -777,7 +892,7 @@ export function CaseReview() {
                       src={getImageUrl(caseData.imagePath)} 
                       className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
                       alt="Patient Radiograph" 
-                      onLoad={handleImageLoad}
+                      onLoad={handleExp1ImageLoad}
                     />
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
@@ -785,23 +900,17 @@ export function CaseReview() {
 
                   {showAnnotations && (
                     <>
-                      {(isDualView ? exp1Annotations : annotationFindings).map((finding, idx) => {
-                        const x1 = finding.bbox_x1 as number;
-                        const y1 = finding.bbox_y1 as number;
-                        const x2 = finding.bbox_x2 as number;
-                        const y2 = finding.bbox_y2 as number;
-                        const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
-                        const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
-                        const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
-                        const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+                      {(showDualOutput ? exp1Annotations : annotationFindings).map((finding, idx) => {
+                        const overlayStyle = getOverlayStyle(finding, exp1ImageLayout);
                         const isPrimary = idx === 0;
                         const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
                         const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+                        const hoverClass = isPrimary ? "hover:bg-red-500/10" : "hover:bg-orange-500/10";
                         return (
                           <div
                             key={`ann1-${idx}-${finding.disease}`}
-                            className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
-                            style={{ left, top, width, height }}
+                            className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors ${hoverClass}`}
+                            style={overlayStyle}
                           >
                             <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
                               {finding.disease.replace(/_/g, " ")}
@@ -821,10 +930,13 @@ export function CaseReview() {
               </div>
 
               {/* Image 2 - Exp 2 (Only if Dual View) */}
-              {isDualView && (
-                <div className="flex flex-col items-center gap-2">
+              {showDualOutput && (
+                <div className="flex w-full max-w-[520px] flex-col items-center gap-2 shrink-0">
                   <h3 className="text-slate-300 font-medium text-sm">Experiment 2 (Foveal & Reasoner)</h3>
-                  <div className="w-[500px] h-[600px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl">
+                  <div
+                    ref={exp2FrameRef}
+                    className="w-full max-w-[500px] aspect-[5/6] min-h-[360px] bg-slate-800 rounded-lg border-2 border-slate-700 relative overflow-hidden shadow-2xl"
+                  >
                     <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 opacity-80"></div>
                     
                     {caseData?.imagePath ? (
@@ -832,6 +944,7 @@ export function CaseReview() {
                         src={getImageUrl(caseData.imagePath)} 
                         className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" 
                         alt="Patient Radiograph" 
+                        onLoad={handleExp2ImageLoad}
                       />
                     ) : (
                       <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
@@ -840,22 +953,16 @@ export function CaseReview() {
                     {showAnnotations && (
                       <>
                         {exp2Annotations.map((finding, idx) => {
-                          const x1 = finding.bbox_x1 as number;
-                          const y1 = finding.bbox_y1 as number;
-                          const x2 = finding.bbox_x2 as number;
-                          const y2 = finding.bbox_y2 as number;
-                          const left = imageLayout.offsetX + (x1 / imageLayout.naturalW) * imageLayout.displayW;
-                          const top = imageLayout.offsetY + (y1 / imageLayout.naturalH) * imageLayout.displayH;
-                          const width = Math.max(12, ((x2 - x1) / imageLayout.naturalW) * imageLayout.displayW);
-                          const height = Math.max(12, ((y2 - y1) / imageLayout.naturalH) * imageLayout.displayH);
+                          const overlayStyle = getOverlayStyle(finding, exp2ImageLayout);
                           const isPrimary = idx === 0;
                           const boxClass = isPrimary ? "border-red-500" : "border-orange-400";
                           const labelClass = isPrimary ? "bg-red-500" : "bg-orange-500";
+                          const hoverClass = isPrimary ? "hover:bg-red-500/10" : "hover:bg-orange-500/10";
                           return (
                             <div
                               key={`ann2-${idx}-${finding.disease}`}
-                              className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
-                              style={{ left, top, width, height }}
+                              className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors ${hoverClass}`}
+                              style={overlayStyle}
                             >
                               <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>
                                 {finding.disease.replace(/_/g, " ")}
@@ -879,7 +986,7 @@ export function CaseReview() {
         </div>
 
         {/* Right Panel - AI Findings */}
-        <div className="w-96 border-l border-slate-200 bg-white overflow-auto">
+        <div className="w-[24rem] min-w-[22rem] max-w-[26rem] border-l border-slate-200 bg-white overflow-auto">
           <ScrollArea className="h-full">
             <div className="p-4 space-y-3">
 
@@ -1082,13 +1189,33 @@ export function CaseReview() {
 
               {/* ── AI DRAFT REPORT ── */}
               <div className="rounded-lg border border-slate-200 overflow-hidden">
-                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200">
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">AI Draft Report</p>
+                <div className="bg-slate-50 px-3.5 py-2 border-b border-slate-200 flex items-center justify-between gap-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Report Preview</p>
+                  <Badge variant="outline" className="text-[10px] capitalize">
+                    {showDualOutput ? "dual" : "single"} model view
+                  </Badge>
                 </div>
                 <div className="px-3.5 py-3">
-                  <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">
-                    {caseData.aiDraftReport || "AI Draft Report has not been generated for this case."}
-                  </p>
+                  {showDualOutput ? (
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                      <div className="rounded-md border border-slate-200 bg-slate-50/70 p-2.5 min-w-0">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 mb-1.5">Experiment 1</p>
+                        <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">
+                          {exp1Report || singleReport}
+                        </p>
+                      </div>
+                      <div className="rounded-md border border-slate-200 bg-slate-50/70 p-2.5 min-w-0">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 mb-1.5">Experiment 2</p>
+                        <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">
+                          {exp2Report || "Second model report is not available yet for this case. Trigger consensus or re-run in dual-model mode to populate."}
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-800 whitespace-pre-wrap break-words leading-relaxed">
+                      {singleReport}
+                    </p>
+                  )}
                 </div>
               </div>
 

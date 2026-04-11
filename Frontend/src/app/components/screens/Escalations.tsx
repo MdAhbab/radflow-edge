@@ -404,8 +404,6 @@ export function Escalations() {
                 <TableHead>Reason for Escalation</TableHead>
                 <TableHead>Priority</TableHead>
                 <TableHead>AI Triage</TableHead>
-                <TableHead className="text-right">Confidence</TableHead>
-                <TableHead>Time Waiting</TableHead>
                 <TableHead>Aging Alert</TableHead>
                 {activeTab === "in-review" && <TableHead>Assigned To</TableHead>}
                 <TableHead className="text-right">Action</TableHead>
@@ -414,19 +412,19 @@ export function Escalations() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8">
+                  <TableCell colSpan={activeTab === "in-review" ? 9 : 8} className="text-center py-8">
                     <Loader2 className="h-6 w-6 animate-spin text-slate-400 mx-auto" />
                   </TableCell>
                 </TableRow>
               ) : error ? (
                 <TableRow>
-                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8 text-red-600">
+                  <TableCell colSpan={activeTab === "in-review" ? 9 : 8} className="text-center py-8 text-red-600">
                     {error}
                   </TableCell>
                 </TableRow>
               ) : filteredCases.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={activeTab === "in-review" ? 11 : 10} className="text-center py-8 text-slate-500">
+                  <TableCell colSpan={activeTab === "in-review" ? 9 : 8} className="text-center py-8 text-slate-500">
                     No cases in this category
                   </TableCell>
                 </TableRow>
@@ -439,27 +437,12 @@ export function Escalations() {
                       {case_.age} / {case_.sex}
                     </TableCell>
                     <TableCell className="max-w-md">
-                      <div className="text-sm text-slate-700">
+                      <div className="text-sm text-slate-700 leading-snug md:columns-2 md:gap-4 [column-fill:balance]">
                         {case_.reasonForEscalation}
                       </div>
                     </TableCell>
                     <TableCell>{getPriorityBadge(case_.priority)}</TableCell>
                     <TableCell>{getTriageBadge(case_.aiTriage)}</TableCell>
-                    <TableCell className="text-right">
-                      <span className={`font-medium ${
-                        (case_.confidence <= 1 ? case_.confidence * 100 : case_.confidence) >= 85 ? "text-green-700" :
-                        (case_.confidence <= 1 ? case_.confidence * 100 : case_.confidence) >= 70 ? "text-yellow-700" :
-                        "text-orange-700"
-                      }`}>
-                        {Math.round((case_.confidence || 0) * ((case_.confidence || 0) <= 1 ? 100 : 1))}%
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5 text-sm">
-                        <Clock className="h-3.5 w-3.5 text-slate-400" />
-                        {case_.timeWaiting}
-                      </div>
-                    </TableCell>
                     <TableCell>
                       <Badge variant={agingLabel(case_.timeWaiting) === "Critical Aging" ? "destructive" : "outline"}>
                         {agingLabel(case_.timeWaiting)}

@@ -417,7 +417,9 @@ export function Worklist() {
 
                         {/* Chief Complaint */}
                         <TableCell>
-                          <p className="text-sm text-slate-700 line-clamp-2 whitespace-normal leading-snug">{c.complaint}</p>
+                          <div className="text-sm text-slate-700 whitespace-normal leading-snug md:columns-2 md:gap-4 [column-fill:balance]">
+                            {c.complaint}
+                          </div>
                         </TableCell>
 
                         {/* Received */}
