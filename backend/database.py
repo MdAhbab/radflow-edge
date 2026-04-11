@@ -61,6 +61,7 @@ class Finding(Base):
     bbox_y2 = Column(Integer, nullable=True)
     report = Column(Text, nullable=True)
     severity = Column(String(20), nullable=True)
+    source_engine = Column(String(50), nullable=True)
     is_deleted = Column(Integer, default=0)
     deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -186,6 +187,8 @@ def _run_sqlite_migrations() -> None:
             conn.execute(text("ALTER TABLE findings ADD COLUMN is_deleted INTEGER DEFAULT 0"))
         if "deleted_at" not in finding_names:
             conn.execute(text("ALTER TABLE findings ADD COLUMN deleted_at DATETIME"))
+        if "source_engine" not in finding_names:
+            conn.execute(text("ALTER TABLE findings ADD COLUMN source_engine VARCHAR(50)"))
 
         conn.commit()
 

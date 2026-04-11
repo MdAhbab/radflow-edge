@@ -101,7 +101,24 @@ export function NewReport() {
         patientId: formData.patientIdLinked || undefined 
       };
 
-      const createdCase = await api.createCase(newCaseData);
+      let createdCase = await api.createCase(newCaseData);
+
+      // If auto-analysis on the server did not finish (aiStatus still "ready"), run full pipeline once.
+      if (createdCase.aiStatus === "ready" && createdCase.imagePath) {
+        try {
+          await api.analyzeXray({
+            imagePath: createdCase.imagePath,
+            patientId: createdCase.patientId,
+            patientContext: `${createdCase.age}${createdCase.sex}, complaint: ${createdCase.complaint}`,
+            userAction: "new_report_fallback",
+          });
+          createdCase = await api.getCase(createdCase.patientId);
+        } catch (fallbackErr) {
+          console.error("Analyze fallback:", fallbackErr);
+          toast.warning("Report saved. AI analysis will complete when you open the case.");
+        }
+      }
+
       localStorage.setItem("hsil_last_viewed_case", createdCase.patientId);
       
       setSuccess(true);
