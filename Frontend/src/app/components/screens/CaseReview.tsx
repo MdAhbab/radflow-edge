@@ -31,6 +31,13 @@ interface ChatMessage {
   content: string;
 }
 
+interface ParsedCopilotSection {
+  index: number;
+  title: string;
+  body: string;
+  bullets: string[];
+}
+
 export function CaseReview() {
   const IMAGE_FRAME_WIDTH = 500;
   const IMAGE_FRAME_HEIGHT = 600;
@@ -155,7 +162,95 @@ export function CaseReview() {
       .slice(0, 5);
   };
 
+  const cleanCopilotText = (value: string): string => {
+    return value.replace(/\*\*/g, "").replace(/^[:\-\s]+/, "").trim();
+  };
+
+  const parseCopilotSections = (content: string): ParsedCopilotSection[] => {
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const sections: Array<ParsedCopilotSection & { bodyLines: string[] }> = [];
+    let current: (ParsedCopilotSection & { bodyLines: string[] }) | null = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      const sectionMatch = line.match(/^\s*(\d+)[.)]\s*(?:\*\*)?([^:*]+?)(?:\*\*)?\s*:\s*(.*)$/);
+
+      if (sectionMatch) {
+        if (current) {
+          current.body = cleanCopilotText(current.bodyLines.join(" "));
+          sections.push(current);
+        }
+
+        current = {
+          index: Number(sectionMatch[1]),
+          title: cleanCopilotText(sectionMatch[2]),
+          body: "",
+          bullets: [],
+          bodyLines: [],
+        };
+
+        const inlineBody = cleanCopilotText(sectionMatch[3] || "");
+        if (inlineBody) current.bodyLines.push(inlineBody);
+        continue;
+      }
+
+      if (!current) continue;
+
+      const bulletMatch = line.match(/^\s*[*\-]\s+(.*)$/);
+      if (bulletMatch) {
+        const bullet = cleanCopilotText(bulletMatch[1]);
+        if (bullet) current.bullets.push(bullet);
+        continue;
+      }
+
+      if (line.trim()) {
+        current.bodyLines.push(cleanCopilotText(line));
+      }
+    }
+
+    if (current) {
+      current.body = cleanCopilotText(current.bodyLines.join(" "));
+      sections.push(current);
+    }
+
+    return sections
+      .sort((a, b) => a.index - b.index)
+      .map(({ bodyLines, ...section }) => section);
+  };
+
   const recommendedSteps = parseRecommendedSteps(caseData?.recommendedSteps);
+
+  const renderAssistantMessage = (content: string) => {
+    const sections = parseCopilotSections(content);
+    if (sections.length < 2) {
+      return <div className="whitespace-pre-wrap leading-relaxed">{content}</div>;
+    }
+
+    return (
+      <div className="space-y-2.5">
+        {sections.map((section) => (
+          <div key={`${section.index}-${section.title}`} className="rounded-md border border-blue-100 bg-white/70 p-2.5">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-[11px] font-semibold text-blue-700">
+                {section.index}
+              </span>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-700">{section.title}</p>
+            </div>
+
+            {section.body && <p className="mt-1.5 text-sm text-slate-800 leading-relaxed">{section.body}</p>}
+
+            {section.bullets.length > 0 && (
+              <ul className="mt-1.5 space-y-1 list-disc pl-5 text-sm text-slate-800">
+                {section.bullets.map((bullet, bulletIndex) => (
+                  <li key={`${section.index}-bullet-${bulletIndex}`}>{bullet}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   const handlePromptChip = async (prompt: string) => {
     if (!patientId) return;
@@ -1080,7 +1175,9 @@ export function CaseReview() {
                             <span className="font-medium">AI Copilot</span>
                           </div>
                         )}
-                        <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                        {msg.role === "assistant" ? renderAssistantMessage(msg.content) : (
+                          <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                        )}
                       </div>
                     </div>
                   ))}
