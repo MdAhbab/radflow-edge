@@ -887,6 +887,22 @@ def _get_exp1_components():
     return _exp1_detector, _exp1_localizer
 
 
+def _is_exp1_analyzer_enabled() -> bool:
+    flag = os.getenv("HSIL_ENABLE_EXP1_ANALYZER", "auto").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    if flag in {"0", "false", "no", "off"}:
+        return False
+
+    # Auto mode: keep heavy VLM analyzer for CUDA systems by default.
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 def _get_exp1_analyzer_optional():
     global _exp1_analyzer, _exp1_analyzer_error
 
@@ -894,6 +910,13 @@ def _get_exp1_analyzer_optional():
         return _exp1_analyzer
 
     if _exp1_analyzer_error is not None:
+        return None
+
+    if not _is_exp1_analyzer_enabled():
+        _exp1_analyzer_error = (
+            "disabled by default on non-CUDA devices to avoid excessive memory/swap usage "
+            "(set HSIL_ENABLE_EXP1_ANALYZER=1 to force enable)"
+        )
         return None
 
     try:

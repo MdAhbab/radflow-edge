@@ -9,6 +9,28 @@ try:
 except Exception:
     BitsAndBytesConfig = None
 
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+def _read_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
 class CheXagentAnalyzer:
     @staticmethod
     def _resolve_local_model_path(local_model_path: str) -> str:
@@ -80,6 +102,10 @@ class CheXagentAnalyzer:
 
     def __init__(self, model_id="StanfordAIMI/CheXagent-8b", device=None):
         requested_device = os.getenv("HSIL_ANALYZER_DEVICE", "auto").lower()
+        self.allow_cpu_fallback = os.getenv("HSIL_ANALYZER_ALLOW_CPU_FALLBACK", "0") == "1"
+        self.max_new_tokens = _read_int_env("HSIL_ANALYZER_MAX_NEW_TOKENS", 120)
+        self.max_time_sec = _read_float_env("HSIL_ANALYZER_MAX_TIME_SEC", 45.0)
+
         if device:
             self.device = device
         elif requested_device in {"cuda", "mps", "cpu"}:
@@ -108,8 +134,14 @@ class CheXagentAnalyzer:
         self.model = None
         load_errors = []
         device_order = [self.device]
-        if self.device == "mps":
-            # If Apple GPU memory is insufficient, retry CPU so macOS VM/swap can still execute.
+        if self.device == "cpu" and os.getenv("HSIL_ENABLE_CHEXAGENT_ON_CPU", "0") != "1":
+            raise RuntimeError(
+                "CheXagent on CPU is disabled by default to prevent extreme swap usage. "
+                "Set HSIL_ENABLE_CHEXAGENT_ON_CPU=1 to force CPU mode."
+            )
+
+        if self.device == "mps" and self.allow_cpu_fallback:
+            # CPU fallback is opt-in because 8B CPU inference can trigger excessive swap usage.
             device_order.append("cpu")
 
         for candidate_device in device_order:
@@ -151,14 +183,31 @@ NEXT STEPS: Recommended actions or follow-up imaging.'''
 
         try:
             with torch.no_grad():
-                out = self.model.generate(**inputs, max_new_tokens=300)
+                out = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    max_time=self.max_time_sec,
+                    do_sample=False,
+                    num_beams=1,
+                )
         except RuntimeError as ex:
-            if self.device == "mps" and self._is_oom_error(ex):
+            if self.device == "mps" and self._is_oom_error(ex) and self.allow_cpu_fallback:
                 print("CheXagent MPS OOM during generation. Falling back to CPU.")
                 self._move_model_to_cpu()
                 inputs = {k: v.to("cpu") for k, v in inputs.items()}
                 with torch.no_grad():
-                    out = self.model.generate(**inputs, max_new_tokens=300)
+                    out = self.model.generate(
+                        **inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        max_time=self.max_time_sec,
+                        do_sample=False,
+                        num_beams=1,
+                    )
+            elif self.device == "mps" and self._is_oom_error(ex):
+                raise RuntimeError(
+                    "CheXagent MPS ran out of memory. CPU fallback is disabled by default to avoid swap storms. "
+                    "Set HSIL_ANALYZER_ALLOW_CPU_FALLBACK=1 to force fallback."
+                ) from ex
             else:
                 raise
             
