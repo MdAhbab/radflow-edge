@@ -25,6 +25,8 @@ coverage.xml
 htmlcov/
 # --- Frontend / Node ---
 node_modules/
+Frontend/dist/
+Frontend/D:*/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -50,7 +52,14 @@ Frontend/.vite/
 .Trashes
 
 Models/
+models/
 imagedata/
+
+# --- Runtime state / data ---
+*.db
+.active_ai_model
+.logs/
+.files/
 
 !*.py
 !*.ts
