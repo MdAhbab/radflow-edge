@@ -1,9 +1,10 @@
+# RadFlow-Edge
 
-# HSIL Hackathon 2026 - RadFlow-Edge & Foveal Engine
+> **AI-Powered Radiological Triage for Resource-Constrained Environments**
 
-> **AI-Powered Radiological Triage System for Resource-Constrained Environments**
+RadFlow-Edge is a 100% offline, edge-native AI that lets a single rural medical officer or community health worker run chest-X-ray triage, dermatology triage, multimodal risk scoring, and Bangla voice-driven protocol guidance from one mid-tier PC.
 
-Harvard Health Systems Innovation Lab Hackathon - April 10-11, 2026
+Originally built for the Harvard Health Systems Innovation Lab Hackathon 2026 (April 10-11).
 
 ---
 
