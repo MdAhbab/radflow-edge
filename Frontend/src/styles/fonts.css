@@ -1,8 +1,11 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300..800;1,14..32,300..800&family=Plus+Jakarta+Sans:ital,wght@0,300..800;1,300..800&display=swap');
+/* Fonts are bundled locally (Fontsource) so the app renders identically
+   offline — no CDN dependency in clinic deployments. */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/plus-jakarta-sans';
 
 :root {
-  --font-sans: 'Inter', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-  --font-display: 'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+  --font-display: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
 }
 
 body {
