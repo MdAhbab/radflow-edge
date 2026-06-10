@@ -2925,6 +2925,9 @@ def _ollama_chat(messages: List[Dict[str, Any]], timeout_sec: float, num_predict
         "model": _get_local_llm_model(),
         "messages": messages,
         "stream": False,
+        # Gemma 4 is a thinking model; without this its hidden reasoning
+        # consumes the token budget and the visible answer comes back empty.
+        "think": False,
         "options": options,
     }
     resp = requests.post(f"{_get_ollama_base_url()}/api/chat", json=payload, timeout=timeout_sec)
