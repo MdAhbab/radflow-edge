@@ -1,60 +1,55 @@
 # Experiment 1: RadFlow-Edge — CNN → GradCAM → VLM Pipeline
 
-> **Status:** CLEAN & PORTABLE Ready for Hackathon ZIP transfer.
+A 4-stage pipeline that takes a raw chest X-ray and produces a structured triage report.
 
 ---
 
-## 🚀 How to Setup on Your NEW PC (High Config)
+## Stages
 
-Once you unzip this project on your new high-config PC, follow these exact steps:
+1. **Detector** (`core/detector.py`) — TorchXRayVision DenseNet121 scores 18 pathologies from a 224×224 grayscale crop.
+2. **Localizer** (`core/localizer.py`) — GradCAM generates a heatmap and 512×512 bounding-box crop of the highest-activation region.
+3. **RAG** (`core/rag.py`) — ChromaDB retrieves relevant clinical guidelines for the top finding.
+4. **Analyzer** (`core/analyzer.py`) — CheXagent-8b (NVIDIA only, 4-bit quantized) generates a detailed VLM report. On Apple Silicon / CPU, Gemma 4 E2B via Ollama generates the narrative instead.
 
-### Step 1: Create a New Environment
-Open your terminal inside the project root and run:
-```bash
-python -m venv .venv
-source .venv/bin/activate  # (On Windows: .venv\Scripts\activate)
-pip install -r requirements.txt
-```
+---
 
-### Step 2: Download Models Locally (IMPORTANT)
-Run this script to download all weights **directly into the project folder** (not your global home folder). This makes the project self-contained:
+## Setup
+
+See the project-root `guide.md` for full environment setup. The experiment-specific step is downloading the model weights:
+
 ```bash
 cd "Experiment 1/radflow_edge"
+
+# DenseNet121 (~27 MB, required)
 python download_models.py
-```
-*Note: This will download DenseNet (~28MB) and CheXagent (~16GB) into `./models/` inside your project.*
 
-### Step 3: Run the App
-```bash
-# Start backend
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-
-# Start UI
-chainlit run ui/app.py
+# + CheXagent-8b (~16 GB, NVIDIA only)
+python download_models.py --full
 ```
 
----
-
-## What This Experiment Does
-RadFlow-Edge is a 4-stage pipeline that takes a raw radiology image and produces a clinical triage report.
-
-1. **DETECTOR**: DenseNet121 scans for 18 pathologies.
-2. **LOCALIZER**: GradCAM highlights and crops the anomaly.
-3. **RAG**: Pulls clinical guidelines from `knowledge_base/`.
-4. **ANALYZER**: CheXagent-8b generates the final VLM report.
+Weights are written to `models/` at the project root (two levels up from here).
 
 ---
 
-## Portability Feature
-The code is now hardcoded to look for weights in:
-- `HSIL_Hackathon/models/xrv/`
-- `HSIL_Hackathon/models/chexagent/`
+## Running standalone
 
-This ensures that once you download the models on your new PC, the entire folder (including models) is one single unit that can be moved without re-downloading.
+The experiment is normally invoked through `backend/main.py` via the unified API. To call the pipeline directly:
+
+```python
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "radflow_edge"))
+from core.pipeline import RadFlowPipeline
+
+pipeline = RadFlowPipeline()
+result = pipeline.analyze("path/to/xray.png", patient_context="42M, cough")
+print(result)
+```
 
 ---
 
-## Token Management & Support
-- **Resolution**: 224x224 and 512x512 crops keep visual tokens low (~300).
-- **Quantization**: Automatically uses 4-bit loading via `bitsandbytes` to stay within VRAM limits.
-- **NVIDIA support**: `requirements.txt` is optimized to pull CUDA-enabled torch on your new PC.
+## Hardware notes
+
+- **Resolution**: images are resized to 224×224 for the detector; GradCAM crops are 512×512.
+- **Quantization**: CheXagent uses 4-bit loading via `bitsandbytes` to stay within VRAM limits on NVIDIA.
+- **Apple Silicon / CPU**: CheXagent is disabled by default; Gemma 4 E2B (Ollama) generates the report narrative.
+- Set `HSIL_ENABLE_EXP1_ANALYZER=1` to force-load CheXagent on non-CUDA hardware (slow).

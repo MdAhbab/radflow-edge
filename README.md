@@ -1,292 +1,254 @@
 # RadFlow-Edge
 
-> **AI-Powered Radiological Triage for Resource-Constrained Environments**
+> **Offline-first AI radiology triage for resource-constrained clinical environments**
 
-RadFlow-Edge is a 100% offline, edge-native AI that lets a single rural medical officer or community health worker run chest-X-ray triage, dermatology triage, multimodal risk scoring, and Bangla voice-driven protocol guidance from one mid-tier PC.
-
-Originally built for the Harvard Health Systems Innovation Lab Hackathon 2026 (April 10-11).
+RadFlow-Edge runs entirely on-device — no cloud dependency, no data leaving the facility. A single mid-range laptop can perform chest X-ray triage, GradCAM-guided anomaly localization, and AI-generated narrative reports using only local models.
 
 ---
 
-## 🚀 Super Quick Start (Recommended)
+## What it does
 
-**One-Click Launcher** - Runs Backend + Frontend + AI Pipeline:
+| Layer | What it runs |
+|-------|-------------|
+| **Detector** | TorchXRayVision DenseNet121 — scores 18 chest pathologies |
+| **Localizer** | GradCAM — heatmap + bounding box overlay |
+| **Narrative** | Gemma 4 E2B via Ollama — vision-capable, structured report |
+| **Copilot** | Gemma 4 E2B — contextual Q&A scoped to the open case |
+| **Foveal (Exp 2)** | OpenCV contrast crop — reduces VLM token load ~80% |
+
+All AI inference is async-queued (SQLite-backed job table). The frontend polls for results; the case creation endpoint returns immediately.
+
+---
+
+## Prerequisites
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Python | 3.11+ | Tested on 3.11 |
+| Node.js | 18+ | For the React frontend |
+| [Ollama](https://ollama.com) | latest | Local LLM runtime |
+| gemma4:e2b | — | Pull once: `ollama pull gemma4:e2b` |
+
+---
+
+## Quick start
 
 ```bash
-# Windows
-run_all.bat
+# 1. Activate the Python environment (create it first if needed — see Setup below)
+source .venv/bin/activate
 
-# Mac/Linux
-./run_all.sh
-
-# Or directly with Python
+# 2. Launch everything (backend + frontend + AI pipeline picker)
 python run_all.py
 ```
 
-The launcher will:
-- ✅ Check all dependencies
-- ✅ Ask which AI pipeline to use (Experiment 1, 2, or both)
-- ✅ Start the backend API server
-- ✅ Start the frontend dev server
-- ✅ Monitor all services and handle cleanup
+Then open **http://localhost:5173**
 
-Pipeline mode behavior:
-- `Experiment 1` -> `/api/v1/analyze` uses RadFlow
-- `Experiment 2` -> `/api/v1/analyze` uses Foveal pipeline path
-- `Both` -> both pipelines available (RadFlow default analyze, Foveal endpoint available)
-- `Backend + Frontend Only` -> AI analysis disabled
-
-**Then open**: http://localhost:5173
+Set `HSIL_DEV=1` before running if you want uvicorn's file watcher (hot-reload):
+```bash
+HSIL_DEV=1 python run_all.py
+```
 
 ---
 
-## Manual Setup (Alternative)
+## Full Setup (fresh machine)
 
-### 1. Install Python Dependencies
+### 1. Python environment
 
 ```bash
-# Create virtual environment
-cd HSIL_Hackathon
 python -m venv .venv
 
-# Activate (Windows)
-.venv\Scripts\activate
-
-# Activate (Mac/Linux)
+# macOS / Linux
 source .venv/bin/activate
+
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Install PyTorch (Choose Your Hardware)
+### 2. PyTorch — pick your hardware
 
-**For Intel ARC GPU (Windows):**
+**Apple Silicon (M1/M2/M3/M4):**
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-pip install intel-extension-for-pytorch
+pip install torch torchvision torchaudio
 ```
 
-**For NVIDIA GPU:**
+**NVIDIA GPU (CUDA 12.1):**
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
-**For Apple Silicon (Mac M1/M2/M3):**
-```bash
-pip install torch torchvision torchaudio
-pip install mlx mlx-vlm  # Optional: for optimized inference
-```
-
-**For CPU Only:**
+**CPU only / Intel:**
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
-### 3. Install Other Dependencies
+### 3. Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Download AI Models
+### 4. AI model weights
 
 ```bash
 cd "Experiment 1/radflow_edge"
 
-# Quick download (TorchXRayVision only - ~28MB)
+# Detector only — DenseNet121 (~27 MB, required)
 python download_models.py
 
-# Full download (includes CheXagent-8b - ~16GB)
+# + CheXagent-8b (~16 GB, optional — only used on NVIDIA CUDA)
 python download_models.py --full
 ```
 
-### 5. Start the Backend
+Weights land in `models/` at the project root (gitignored — they stay on disk only).
+
+### 5. Ollama + Gemma 4 E2B
 
 ```bash
-cd backend
-python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# Install Ollama from https://ollama.com, then:
+ollama pull gemma4:e2b
 ```
 
-The API will be available at: http://localhost:8000
+Gemma 4 E2B handles both vision narrative reports and the clinical copilot chat. It must be running (`ollama serve`) before the backend starts — `run_all.py` checks for it automatically.
 
-### 6. Start the Frontend
+### 6. Frontend dependencies
 
 ```bash
 cd Frontend
-npm install  # First time only
+npm install
+cd ..
+```
+
+---
+
+## Manual start (without run_all.py)
+
+```bash
+# Terminal 1 — backend
+source .venv/bin/activate
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — frontend
+cd Frontend
 npm run dev
 ```
 
-Open http://localhost:5173 in your browser.
-
 ---
 
-## Project Structure
+## Project structure
 
 ```
-HSIL_Hackathon/
-├── backend/                    # FastAPI Backend (NEW)
-│   ├── main.py                 # API endpoints
-│   └── hardware.py             # Hardware detection utility
+radflow-edge/
+├── backend/
+│   ├── main.py          # FastAPI app — all routes, job queue, model orchestration
+│   └── database.py      # SQLAlchemy models (cases, findings, escalations, jobs)
 │
-├── Experiment 1/               # RadFlow-Edge (CNN + VLM Pipeline)
+├── Experiment 1/
 │   └── radflow_edge/
 │       ├── core/
-│       │   ├── detector.py     # TorchXRayVision CNN
-│       │   ├── localizer.py    # GradCAM heatmaps
-│       │   ├── analyzer.py     # CheXagent VLM
-│       │   ├── rag.py          # RAG with ChromaDB
-│       │   └── pipeline.py     # Full pipeline orchestration
-│       ├── api/
-│       │   └── main.py         # Legacy API (use backend/ instead)
-│       └── download_models.py  # Model download script
+│       │   ├── detector.py    # DenseNet121 pathology scorer
+│       │   ├── localizer.py   # GradCAM heatmap + crop
+│       │   ├── analyzer.py    # CheXagent-8b VLM (NVIDIA only)
+│       │   ├── rag.py         # ChromaDB retrieval
+│       │   └── pipeline.py    # Full 4-stage orchestrator
+│       └── download_models.py # Weight downloader
 │
-├── Experiment 2/               # Foveal Engine (Vision Hack)
+├── Experiment 2/
 │   └── foveal_engine/
-│       ├── vision_hack.py      # Foveal preprocessing
-│       ├── router.py           # Hardware detection
-│       └── d_rova_concept.py   # Token routing concept
+│       ├── vision_hack.py     # OpenCV foveal crop
+│       └── router.py          # Hardware auto-detection
 │
-├── Frontend/                   # React + TypeScript UI
-│   ├── src/
-│   │   ├── api.ts              # Backend API client
-│   │   └── app/
-│   │       └── components/
-│   │           └── screens/
-│   │               ├── Worklist.tsx
-│   │               ├── CaseReview.tsx
-│   │               └── ...
-│   └── package.json
+├── Frontend/
+│   └── src/
+│       ├── api.ts             # Typed API client with offline queue
+│       └── app/
+│           └── components/
+│               └── screens/   # Worklist, CaseReview, Escalations, EHR…
 │
-├── models/                     # Downloaded AI models (gitignored)
-│   ├── xrv/                    # TorchXRayVision weights
-│   ├── chexagent/              # CheXagent-8b (optional)
-│   └── chroma_db/              # RAG vector database
-│
-└── requirements.txt            # Python dependencies
+├── Documentation/             # Architecture, roadmap, literature review
+├── models/                    # Downloaded weights — gitignored
+├── requirements.txt
+└── run_all.py                 # Unified launcher
 ```
 
 ---
 
-## Hardware Support
+## Environment variables
 
-| Hardware | Detection Method | VLM Strategy |
-|----------|------------------|--------------|
-| **Intel ARC** | `intel-extension-for-pytorch` | CPU inference (bitsandbytes not supported) |
-| **NVIDIA GPU** | `torch.cuda` | 4-bit quantization with bitsandbytes |
-| **Apple Silicon** | MPS backend | mlx-vlm or CPU fallback |
-| **CPU** | Fallback | Full precision (slow) |
+All have safe defaults — only set them if you need to change the defaults.
 
-The system automatically detects your hardware and configures the optimal inference path.
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `HSIL_PIPELINE_MODE` | `experiment1` | Active AI pipeline (`experiment1`, `experiment2`, `both`, `none`) |
+| `HSIL_COPILOT_MODEL` | `gemma4:e2b` | Ollama model for copilot + vision narrative |
+| `HSIL_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
+| `HSIL_GEMMA_TIMEOUT_SEC` | `120` | Per-request timeout for Gemma calls |
+| `HSIL_DISABLE_GEMMA_ANALYZER` | `0` | Set to `1` to skip Gemma narrative generation |
+| `HSIL_ENABLE_EXP1_ANALYZER` | `auto` | Set to `1` to force-enable CheXagent on non-CUDA |
+| `HSIL_DEV` | unset | Set to `1` to enable uvicorn `--reload` |
+| `VITE_API_HOST` | `http://localhost:8000` | Backend base URL for the frontend build |
 
 ---
 
-## API Endpoints
+## API reference
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Check API status and hardware info |
-| `/api/v1/system/status` | GET | Runtime status, capabilities, active pipeline mode |
-| `/api/v1/pipeline/mode` | GET/PUT | Read or update backend pipeline mode |
-| `/api/v1/cases` | GET/POST | Worklist and case creation |
-| `/api/v1/cases/stats/summary` | GET | Case summary statistics |
-| `/api/v1/escalations` | GET/POST | Escalation queue |
-| `/api/v1/escalations/stats` | GET | Escalation summary statistics |
-| `/api/v1/analyze` | POST | Analyze X-ray (full RadFlow pipeline) |
-| `/api/v1/foveal` | POST | Foveal preprocessing only |
-| `/api/v1/chat` | POST | AI Copilot chat |
-
-Frontend API mode indicator:
-- The UI auto-detects backend capabilities from OpenAPI.
-- `Live API` badge appears when unified endpoints (`cases` + `escalations`) are available.
-- `Fallback API` appears when only partial/legacy endpoints are available.
-
-### Example API Usage
-
-```python
-import requests
-
-# Analyze X-ray
-with open("xray.png", "rb") as f:
-    response = requests.post(
-        "http://localhost:8000/api/v1/analyze",
-        files={"file": f},
-        data={"patient_context": "42M, persistent cough, night sweats"}
-    )
-    print(response.json())
-```
+| `/health` | GET | Liveness check |
+| `/api/v1/health` | GET | Liveness with active pipeline mode |
+| `/api/v1/system/status` | GET | Runtime capabilities, model load state |
+| `/api/v1/pipeline/mode` | GET / PUT | Read or change active pipeline |
+| `/api/v1/cases` | GET / POST | Worklist and case creation |
+| `/api/v1/cases/{id}` | GET / PATCH | Case detail and partial update |
+| `/api/v1/cases/{id}/findings` | GET | AI findings for a case |
+| `/api/v1/cases/{id}/download` | POST | Download report bundle |
+| `/api/v1/cases/stats/summary` | GET | Worklist statistics |
+| `/api/v1/escalations` | GET / POST | Escalation queue |
+| `/api/v1/escalations/stats` | GET | Escalation summary |
+| `/api/v1/analyze/jobs` | POST | Enqueue an analysis job directly |
+| `/api/v1/analyze/jobs/{id}` | GET | Poll job status |
+| `/api/v1/chat` | POST | Copilot chat against a case |
+| `/api/v1/ehr` | GET | EHR patient list |
 
 ---
 
-## Experiments Overview
+## Hardware support
 
-### Experiment 1: RadFlow-Edge
+| Hardware | Detector | GradCAM | CheXagent VLM | Gemma narrative |
+|----------|----------|---------|----------------|-----------------|
+| Apple Silicon | CPU/MPS | CPU/MPS | Disabled by default | Ollama (CPU/MPS) |
+| NVIDIA GPU | CUDA | CUDA | 4-bit quantized | Ollama (GPU) |
+| CPU only | CPU | CPU | Disabled | Ollama (CPU) |
 
-A 4-stage pipeline for chest X-ray analysis:
-
-1. **Detection**: TorchXRayVision DenseNet121 detects 18 pathologies
-2. **Localization**: GradCAM generates heatmaps and bounding boxes
-3. **RAG Retrieval**: ChromaDB retrieves relevant medical guidelines
-4. **Analysis**: CheXagent-8b generates detailed reports
-
-### Experiment 2: Foveal Engine
-
-Efficient preprocessing for high-resolution images:
-
-1. **Vision Hack**: Crops 512x512 anomaly regions from 2000x2000+ images
-2. **Token Reduction**: Reduces VLM token count by ~80%
-3. **Hardware Routing**: Auto-detects optimal compute backend
-
----
-
-## Database Recommendation
-
-For the HSIL Hackathon, we recommend:
-
-### Development/Demo: SQLite + ChromaDB
-- **SQLite**: Patient cases, worklist, audit logs
-- **ChromaDB**: RAG vector embeddings (already integrated)
-
-### Production Scale: PostgreSQL + pgvector
-- **PostgreSQL**: ACID compliance for patient data
-- **pgvector**: Native vector similarity search
-
-The current implementation uses ChromaDB for RAG, which is sufficient for the hackathon demo. Patient data in the frontend is mocked - connect to a real database for production.
+On Apple Silicon and CPU-only machines Gemma 4 E2B generates the narrative report that would otherwise come from CheXagent.
 
 ---
 
 ## Troubleshooting
 
-### App shows Fallback API badge
-You likely started a legacy API entrypoint. Start the unified backend from `backend/main.py` (or use `python run_all.py`) so `/api/v1/cases` and `/api/v1/escalations` are available.
+**Copilot returns empty responses**
+Gemma 4 E2B is a thinking model. The backend already sets `think: false` in all Ollama calls to prevent the hidden reasoning chain from consuming the token budget. If you're calling Ollama directly outside this app, add `"think": false` to your payload.
 
-### "Model not found" error
+**"Model not found" on startup**
 Run the download script:
 ```bash
 cd "Experiment 1/radflow_edge"
 python download_models.py
 ```
 
-### "CUDA out of memory" on NVIDIA
-The system auto-uses 4-bit quantization. If still failing, use CPU:
-```python
-# In analyzer.py, force CPU:
-self.device = "cpu"
-```
+**Frontend shows stale / no AI findings**
+Analysis is async. After creating a case the frontend polls `/api/v1/cases/{id}/findings` every few seconds. If the job is stuck, check the backend terminal for the inference worker log lines.
 
-### Intel ARC not detected
-Ensure Intel Extension for PyTorch is installed:
+**Backend port already in use**
 ```bash
-pip install intel-extension-for-pytorch
+lsof -ti:8000 | xargs kill -9
 ```
 
-### Frontend can't connect to backend
-Check CORS origins in `backend/main.py` match your frontend URL.
+**Ollama not reachable**
+Make sure `ollama serve` is running and reachable at `http://localhost:11434`. The backend will log a warning on startup if it cannot reach Ollama.
 
 ---
 
 ## License
 
-MIT License - Harvard HSIL Hackathon 2026
-
-## Team Radflow Bangladesh
-
-Built for the Harvard Health Systems Innovation Lab Hackathon 2026
+MIT

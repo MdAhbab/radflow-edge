@@ -1,51 +1,53 @@
-# Experiment 2: Foveal Triage Engine — Vision Hack + D-RoVA Architecture
+# Experiment 2: Foveal Triage Engine
 
-> **Status:** CLEAN & PORTABLE Ready for Hackathon ZIP transfer.
+Fast anomaly localisation using OpenCV contrast analysis, designed to reduce the VLM token load before passing an image to a language model.
 
 ---
 
-## 🚀 How to Setup on Your NEW PC (High Config)
+## What it does
 
-Once you unzip this project on your new high-config PC, follow these exact steps:
+1. **Vision Hack** (`foveal_engine/vision_hack.py`) — scans the image with a sliding contrast window and crops a 512×512 "foveal" region centred on the highest-contrast anomaly. Runs in milliseconds with no model required.
+2. **Hardware Router** (`foveal_engine/router.py`) — detects Apple Silicon, NVIDIA, or CPU and returns the appropriate inference backend label.
+3. **D-RoVA concept** (`foveal_engine/d_rova_concept.py`) — conceptual token router that demonstrates how irrelevant visual tokens could be dropped before VLM inference.
 
-### Step 1: Create a New Environment
-Open your terminal inside the project root and run:
+The foveal crop reduces token count by ~80% compared to passing the full image, which matters on edge hardware with limited VRAM or slow CPU inference.
+
+---
+
+## Setup
+
+No model weights required for Experiment 2. Follow the project-root `guide.md` for the Python environment, then:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # (On Windows: .venv\Scripts\activate)
-pip install -r requirements.txt
-```
-
-### Step 2: Download Models Locally (IMPORTANT)
-Even for Experiment 2, some features may benefit from the local weights. Run this script in the radflow_edge folder (it populates the shared root `models/` folder):
-```bash
+# Experiment 2 shares the models/ directory with Experiment 1 for any optional VLM calls.
+# Run the Experiment 1 download if you want those weights available:
 cd "Experiment 1/radflow_edge"
 python download_models.py
 ```
-*Note: This will download DenseNet (~28MB) and CheXagent (~16GB) into the root `/models/` directory.*
 
-### Step 3: Run the App
-```bash
-cd "Experiment 2/ui"
-chainlit run app.py
+---
+
+## Running standalone
+
+```python
+from foveal_engine.vision_hack import FovealCrop
+
+cropper = FovealCrop()
+crop_path = cropper.process("path/to/xray.png")
+print(f"Foveal crop saved to: {crop_path}")
+```
+
+Or via the backend API (when pipeline mode includes `experiment2`):
+```
+POST /api/v1/foveal
+Content-Type: multipart/form-data
+file: <image>
 ```
 
 ---
 
-## What This Experiment Does
-Experiment 2 focuses on high-speed anomaly detection using OpenCV (Vision Hack) and the novel D-RoVA architecture concept.
+## Hardware optimisation
 
-1. **Vision Hack**: Uses contrast analysis to crop a 512x512 "Foveal" region instantly.
-2. **Hardware Router**: Automatically detects Apple Silicon vs NVIDIA GPUs.
-3. **D-RoVA**: Conceptual token router that drops irrelevant visual tokens.
-
----
-
-## Portability Feature
-This experiment is designed to work alongside Experiment 1, sharing the same `./models/` directory. By keeping weights local to the project, you can move the entire workspace between machines once the initial download is complete.
-
----
-
-## Hardware Optimization
-- **Mac**: Uses `mlx-vlm` if installed for native M-series performance.
-- **NVIDIA**: Uses the standard 4-bit `transformers` path for high-end GPUs.
+- **Apple Silicon**: uses `mlx-vlm` if installed for native M-series VLM inference.
+- **NVIDIA**: uses the standard 4-bit `transformers` path.
+- **CPU**: full-precision fallback.

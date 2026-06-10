@@ -33,7 +33,7 @@ from database import (
     EscalationEvent,
 )
 
-app = FastAPI(title="HSIL Hackathon API")
+app = FastAPI(title="RadFlow-Edge API")
 
 ALLOWED_PIPELINES = {"experiment1", "experiment2", "both", "none"}
 
@@ -2164,7 +2164,7 @@ def get_system_status(db: Session = Depends(get_db)):
 def health_check():
     return {
         "status": "ok",
-        "service": "hsil-backend",
+        "service": "radflow-edge",
         "active_model": active_ai_model,
     }
 
@@ -2173,7 +2173,7 @@ def health_check():
 def api_health_check():
     return {
         "status": "ok",
-        "service": "hsil-backend",
+        "service": "radflow-edge",
         "active_model": active_ai_model,
     }
 
@@ -3001,7 +3001,7 @@ def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> 
     model_name = _get_local_llm_model()
 
     system_prompt = (
-        "You are HSIL Clinical Copilot. Respond for clinicians reviewing a chest X-ray case. "
+        "You are RadFlow Copilot. Respond for clinicians reviewing a chest X-ray case. "
         "Use concise, clinically appropriate language with practical suggestions. "
         "Prefer percentages for confidence when present. "
         "Base your answer strictly on supplied case context. "
