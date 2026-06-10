@@ -7,6 +7,16 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { ScrollArea } from "../ui/scroll-area";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
 
 interface PatientGroup {
   patientId: string;
@@ -26,9 +36,12 @@ export function EHR() {
   const [search, setSearch] = useState("");
   const [recycleBin, setRecycleBin] = useState<RecycleBinItem[]>([]);
   const [recycleLoading, setRecycleLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ patientId: string; name: string } | null>(null);
 
   const loadEhr = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const [activeCases, archivedCases] = await Promise.all([
         api.getCases(false),
@@ -36,6 +49,8 @@ export function EHR() {
       ]);
       const combined = [...activeCases, ...archivedCases];
       setCases(combined);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load patient records");
     } finally {
       setLoading(false);
     }
@@ -46,6 +61,8 @@ export function EHR() {
     try {
       const items = await api.getRecycleBin();
       setRecycleBin(items);
+    } catch {
+      // Recycle bin is auxiliary; main load error state covers connectivity.
     } finally {
       setRecycleLoading(false);
     }
@@ -56,10 +73,7 @@ export function EHR() {
     loadRecycleBin();
   }, []);
 
-  const handleDeletePatientHistory = async (patientId: string, patientName: string) => {
-    const confirmed = window.confirm(`Delete all case-history records for ${patientName} (${patientId})? This cannot be undone.`);
-    if (!confirmed) return;
-
+  const handleDeletePatientHistory = async (patientId: string) => {
     try {
       const result = await api.deletePatientHistory(patientId);
       toast.success(`Moved ${result.softDeletedCases} case records to recycle bin for ${patientId}.`);
@@ -180,6 +194,30 @@ export function EHR() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete patient history?</AlertDialogTitle>
+            <AlertDialogDescription>
+              All case-history records for {deleteTarget?.name} ({deleteTarget?.patientId}) will be
+              moved to the recycle bin. They can be restored by an administrator.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={() => {
+                if (deleteTarget) handleDeletePatientHistory(deleteTarget.patientId);
+                setDeleteTarget(null);
+              }}
+            >
+              Delete History
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="bg-white border-b border-slate-200 p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -207,6 +245,13 @@ export function EHR() {
             <div className="p-4 space-y-2">
               {loading ? (
                 <div className="text-sm text-slate-500">Loading patient records...</div>
+              ) : loadError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2">
+                  <p className="text-sm text-red-700">{loadError}</p>
+                  <Button size="sm" variant="outline" onClick={() => { loadEhr(); loadRecycleBin(); }}>
+                    Retry
+                  </Button>
+                </div>
               ) : patientGroups.length === 0 ? (
                 <div className="text-sm text-slate-500">No EHR records available.</div>
               ) : (
@@ -234,7 +279,7 @@ export function EHR() {
                           className="inline-flex items-center justify-center h-7 w-7 rounded border border-red-200 text-red-600 hover:bg-red-50"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeletePatientHistory(patient.patientId, patient.name);
+                            setDeleteTarget({ patientId: patient.patientId, name: patient.name });
                           }}
                           title="Delete patient history"
                         >

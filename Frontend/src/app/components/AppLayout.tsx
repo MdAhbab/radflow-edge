@@ -105,21 +105,24 @@ export function AppLayout() {
 
   /* ── sidebar counters ── */
   useEffect(() => {
+    let mounted = true;
     const fetch = async () => {
       try {
-        const [, cases] = await Promise.all([api.getCaseStats(), api.getCases()]);
+        const [cases, escStats] = await Promise.all([api.getCases(), api.getEscalationStats()]);
+        if (!mounted) return;
         const queue = cases.filter(c => c.aiStatus === "ready" || c.aiStatus === "analyzing");
-        setStats({ worklist: queue.length, escalations: 0 });
-        const escStats = await api.getEscalationStats();
-        setStats(prev => ({ ...prev, escalations: escStats.awaiting }));
+        setStats({ worklist: queue.length, escalations: escStats.awaiting });
         setIsOffline(false);
       } catch {
-        setIsOffline(true);
+        if (mounted) setIsOffline(true);
       }
     };
     fetch();
     const id = setInterval(fetch, 10_000);
-    return () => clearInterval(id);
+    return () => {
+      mounted = false;
+      clearInterval(id);
+    };
   }, []);
 
   const handleSignOut = () => {

@@ -210,23 +210,6 @@ export interface LegacyReanalyzeResult {
   errors: string[];
 }
 
-export interface LegacyRefreshRequest {
-  includeArchived?: boolean;
-  limit?: number;
-  continueOnError?: boolean;
-}
-
-export interface LegacyRefreshResult {
-  totalCandidates: number;
-  processed: number;
-  refreshed: number;
-  skippedMissingImage: number;
-  skippedNoFindings: number;
-  skippedAlreadyTagged: number;
-  failed: number;
-  errors: string[];
-}
-
 export interface FindingData {
   case_id: string;
   disease: string;
@@ -265,8 +248,8 @@ export interface ChatResponse {
   response: string;
 }
 
-const API_BASE = "http://localhost:8000/api/v1";
-const API_HOST = "http://localhost:8000";
+const API_HOST = import.meta.env.VITE_API_HOST ?? "http://localhost:8000";
+const API_BASE = `${API_HOST}/api/v1`;
 
 export function getImageUrl(imagePath: string | null | undefined): string | undefined {
   if (!imagePath) return undefined;
@@ -302,6 +285,13 @@ const enqueueOfflineMutation = (item: Omit<OfflineQueueItem, "id" | "createdAt" 
   writeOfflineQueue(queue);
   return nextItem;
 };
+
+// Only connectivity failures should be queued for later sync. Server-side
+// rejections (validation, 404s) would replay forever and never succeed.
+const isNetworkError = (err: unknown): boolean =>
+  err instanceof TypeError || (err instanceof Error && /fetch|network/i.test(err.message));
+
+const MAX_OFFLINE_RETRIES = 5;
 
 export const api = {
   async getCases(history: boolean = false): Promise<CaseData[]> {
@@ -363,6 +353,7 @@ export const api = {
       if (!res.ok) throw new Error("Failed to update case");
       return res.json();
     } catch (err) {
+      if (!isNetworkError(err)) throw err;
       enqueueOfflineMutation({
         route: `/cases/${patientId}`,
         method: "PUT",
@@ -388,7 +379,8 @@ export const api = {
       });
       if (!res.ok) throw new Error("Failed to create escalation");
       return res.json();
-    } catch {
+    } catch (err) {
+      if (!isNetworkError(err)) throw err;
       enqueueOfflineMutation({
         route: "/escalations",
         method: "POST",
@@ -422,7 +414,8 @@ export const api = {
       });
       if (!res.ok) throw new Error("Failed to update escalation");
       return res.json();
-    } catch {
+    } catch (err) {
+      if (!isNetworkError(err)) throw err;
       enqueueOfflineMutation({
         route: `/escalations/${patientId}`,
         method: "PUT",
@@ -450,20 +443,6 @@ export const api = {
       }),
     });
     if (!res.ok) throw new Error("Failed to run legacy reanalysis");
-    return res.json();
-  },
-
-  async refreshLegacyFindings(payload: LegacyRefreshRequest = {}): Promise<LegacyRefreshResult> {
-    const res = await fetch(`${API_BASE}/admin/refresh-legacy-findings`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        includeArchived: payload.includeArchived ?? true,
-        limit: payload.limit,
-        continueOnError: payload.continueOnError ?? true,
-      }),
-    });
-    if (!res.ok) throw new Error("Failed to refresh legacy findings");
     return res.json();
   },
 
@@ -521,7 +500,8 @@ export const api = {
       });
       if (!res.ok) throw new Error("Failed to create case");
       return res.json();
-    } catch {
+    } catch (err) {
+      if (!isNetworkError(err)) throw err;
       const queued = enqueueOfflineMutation({
         route: "/cases",
         method: "POST",
@@ -686,11 +666,14 @@ export const api = {
         replayed += 1;
       } catch (err) {
         failed += 1;
-        remaining.push({
-          ...item,
-          retryCount: item.retryCount + 1,
-          lastError: err instanceof Error ? err.message : "unknown",
-        });
+        // Drop entries that keep failing so the queue cannot grow forever.
+        if (item.retryCount + 1 < MAX_OFFLINE_RETRIES) {
+          remaining.push({
+            ...item,
+            retryCount: item.retryCount + 1,
+            lastError: err instanceof Error ? err.message : "unknown",
+          });
+        }
       }
     }
 

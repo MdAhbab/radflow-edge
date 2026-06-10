@@ -21,6 +21,7 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Separator } from "../ui/separator";
 import { api, getImageUrl, EscalationData, CaseData, FindingData } from "../../../api";
+import { toast } from "sonner";
 import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -157,7 +158,7 @@ export function SpecialistReview() {
   const handleApprove = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      /* alert */ console.log("Select a reason code before approving.");
+      toast.error("Select a decision reason code before approving.");
       return;
     }
     try {
@@ -165,16 +166,17 @@ export function SpecialistReview() {
         status: "finalized",
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
-      /* alert */ console.log("Report approved and finalized");
-    } catch (err) {
-      /* alert */ console.log("Failed to approve report");
+      setEscalation((prev) => prev ? { ...prev, status: "finalized" } : prev);
+      toast.success("Report approved and finalized.");
+    } catch {
+      toast.error("Failed to approve report.");
     }
   };
 
   const handleReturn = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      /* alert */ console.log("Select a reason code before returning case.");
+      toast.error("Select a decision reason code before returning the case.");
       return;
     }
     try {
@@ -182,13 +184,18 @@ export function SpecialistReview() {
         status: "returned",
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
-      /* alert */ console.log("Case returned to clinic");
-    } catch (err) {
-      /* alert */ console.log("Failed to return case");
+      setEscalation((prev) => prev ? { ...prev, status: "returned" } : prev);
+      toast.success("Case returned to clinic with guidance.");
+    } catch {
+      toast.error("Failed to return case.");
     }
   };
 
   const handleEditReport = () => {
+    if (editMode) {
+      setEditMode(false);
+      return;
+    }
     setEditedReport(caseData?.aiDraftReport || "");
     setEditMode(true);
   };
@@ -199,16 +206,16 @@ export function SpecialistReview() {
       await api.updateCase(patientId, { aiDraftReport: editedReport || caseData?.aiDraftReport });
       setCaseData((prev) => prev ? { ...prev, aiDraftReport: editedReport || prev.aiDraftReport } : prev);
       setEditMode(false);
-      /* alert */ console.log("Draft saved successfully.");
+      toast.success("Draft saved.");
     } catch {
-      /* alert */ console.log("Failed to save draft.");
+      toast.error("Failed to save draft.");
     }
   };
 
   const handleFinalizeReturn = async () => {
     if (!patientId) return;
     if (!decisionReason) {
-      /* alert */ console.log("Select a reason code before finalising.");
+      toast.error("Select a decision reason code before finalizing.");
       return;
     }
     try {
@@ -219,9 +226,10 @@ export function SpecialistReview() {
         specialistNotes: `${decisionReason}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
       setEditMode(false);
-      /* alert */ console.log("Case finalised and returned to clinic.");
+      setEscalation((prev) => prev ? { ...prev, status: "returned" } : prev);
+      toast.success("Case finalized and returned to clinic.");
     } catch {
-      /* alert */ console.log("Failed to finalise case.");
+      toast.error("Failed to finalize case.");
     }
   };
 
@@ -233,9 +241,10 @@ export function SpecialistReview() {
         specialistNotes: `TRANSFER RECOMMENDED${decisionReason ? ` | ${decisionReason}` : ""}${specialistNotes ? ` | ${specialistNotes}` : ""}`,
       });
       await api.updateCase(patientId, { priority: "immediate", triageColor: "red" });
-      /* alert */ console.log("Hospital transfer recommended and case escalated.");
+      setEscalation((prev) => prev ? { ...prev, status: "finalized" } : prev);
+      toast.success("Hospital transfer recommended and case escalated.");
     } catch {
-      /* alert */ console.log("Failed to recommend transfer.");
+      toast.error("Failed to recommend transfer.");
     }
   };
 
@@ -250,8 +259,9 @@ export function SpecialistReview() {
       a.download = data.filename;
       a.click();
       window.URL.revokeObjectURL(url);
+      toast.success("Report downloaded.");
     } catch {
-      /* alert */ console.log("Failed to download report.");
+      toast.error("Failed to download report.");
     }
   };
 
@@ -379,7 +389,7 @@ export function SpecialistReview() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-slate-700 leading-relaxed">
-                    {caseData?.complaint || "Chronic cough for 8 months with progressive dyspnea on exertion. Patient reports intermittent chest pain and occasional hemoptysis. No fever or night sweats reported."}
+                    {caseData?.complaint || "No presenting complaint recorded for this case."}
                   </p>
                 </CardContent>
               </Card>
@@ -534,7 +544,10 @@ export function SpecialistReview() {
                 {caseData?.imagePath ? (
                   <img src={getImageUrl(caseData.imagePath)} className="absolute inset-0 w-full h-full object-contain mix-blend-screen opacity-80 pointer-events-none" alt="Patient Radiograph" onLoad={handleImageLoad} />
                 ) : (
-                  <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-500">
+                    <FileText className="w-10 h-10" />
+                    <p className="text-sm">No radiograph available for this case</p>
+                  </div>
                 )}
 
                 {showAnnotations && (
@@ -554,7 +567,7 @@ export function SpecialistReview() {
       return (
         <div
           key={`ann-${idx}-${finding.disease}`}
-          className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors hover:bg-${isPrimary ? 'red' : 'orange'}-500/10`}
+          className={`absolute border-2 ${boxClass} rounded-md shadow-lg transition-colors ${isPrimary ? "hover:bg-red-500/10" : "hover:bg-orange-500/10"}`}
           style={{ left, top, width, height }}
         >
           <div className={`absolute -top-6 left-0 ${labelClass} text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap`}>

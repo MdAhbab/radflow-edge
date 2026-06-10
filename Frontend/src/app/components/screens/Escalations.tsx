@@ -1,8 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router";
-import { 
-  Search, 
-  Filter,
+import {
+  Search,
   Eye,
   Clock,
   AlertTriangle,
@@ -29,6 +28,26 @@ import { useHeader } from "../AppLayout";
 import { api, EscalationData, EscalationStats, EscalationTimelineEvent } from "../../../api";
 import { toast } from "sonner";
 
+/* Self-contained ticker: keeps the once-per-second re-render confined to
+   this tiny label instead of the whole escalations table. */
+function LastUpdatedLabel({ lastUpdatedAt }: { lastUpdatedAt: Date | null }) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!lastUpdatedAt) return;
+    setSeconds(0);
+    const timer = setInterval(() => {
+      setSeconds(Math.max(0, Math.floor((Date.now() - lastUpdatedAt.getTime()) / 1000)));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lastUpdatedAt]);
+
+  return (
+    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mr-2">
+      {lastUpdatedAt ? `Updated ${seconds}s ago` : "Syncing..."}
+    </p>
+  );
+}
 
 export function Escalations() {
   const { setSlots, clearSlots } = useHeader();
@@ -42,7 +61,6 @@ export function Escalations() {
   const [searchQuery, setSearchQuery] = useState("");
   const [updatingPatientId, setUpdatingPatientId] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
-  const [secondsSinceUpdate, setSecondsSinceUpdate] = useState(0);
   const [selectedTimelinePatient, setSelectedTimelinePatient] = useState<string>("");
   const [timelineEvents, setTimelineEvents] = useState<EscalationTimelineEvent[]>([]);
 
@@ -61,10 +79,8 @@ export function Escalations() {
       ),
       right: (
         <div className="flex items-center gap-2">
-          <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mr-2">
-            {lastUpdatedAt ? `Updated ${secondsSinceUpdate}s ago` : "Syncing..."}
-          </p>
-          <Button 
+          <LastUpdatedLabel lastUpdatedAt={lastUpdatedAt} />
+          <Button
             variant="outline" 
             size="sm" 
             className="h-9 border-slate-200 text-slate-600 hover:text-slate-900 shadow-sm" 
@@ -78,7 +94,7 @@ export function Escalations() {
       )
     });
     return () => clearSlots();
-  }, [setSlots, clearSlots, lastUpdatedAt, secondsSinceUpdate, refreshing, loading]);
+  }, [setSlots, clearSlots, lastUpdatedAt, refreshing, loading]);
 
   const computeStatsFromCases = (items: EscalationData[]): EscalationStats => {
     const count = (status: EscalationData["status"]) => items.filter((item) => item.status === status).length;
@@ -122,34 +138,33 @@ export function Escalations() {
         api.getEscalations(),
         api.getEscalationStats()
       ]);
+      if (!mountedRef.current) return;
       setCases(casesData);
       setStats(statsData);
       setLastUpdatedAt(new Date());
-      setSecondsSinceUpdate(0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch data");
+      if (mountedRef.current) setError(err instanceof Error ? err.message : "Failed to fetch data");
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (mountedRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
+  const mountedRef = useRef(true);
   useEffect(() => {
+    mountedRef.current = true;
     fetchData(false);
     const interval = setInterval(() => {
       fetchData(true);
     }, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (!lastUpdatedAt) return;
-    const timer = setInterval(() => {
-      const elapsed = Math.max(0, Math.floor((Date.now() - lastUpdatedAt.getTime()) / 1000));
-      setSecondsSinceUpdate(elapsed);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [lastUpdatedAt]);
 
   const handleStartReview = async (case_: EscalationData) => {
     setUpdatingPatientId(case_.patientId);
@@ -481,7 +496,7 @@ export function Escalations() {
                           <Button 
                             size="sm" 
                             variant="outline"
-                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="text-slate-500 hover:text-slate-900"
                           >
                             <Eye className="h-4 w-4 mr-1.5" />
                             Open Review
@@ -490,7 +505,7 @@ export function Escalations() {
                         <Button
                           size="sm"
                           variant="outline"
-                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="text-slate-500 hover:text-slate-900"
                           onClick={() => loadTimeline(case_.patientId)}
                         >
                           Timeline

@@ -11,7 +11,6 @@ import {
   TrendingUp,
   FileText,
   Send,
-  Mic,
   ChevronDown,
   ChevronUp,
   Loader2
@@ -25,6 +24,16 @@ import { Textarea } from "../ui/textarea";
 import { ScrollArea } from "../ui/scroll-area";
 import { api, getImageUrl, CaseData, FindingData } from "../../../api";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -70,6 +79,7 @@ export function CaseReview() {
   const [chatExpanded, setChatExpanded] = useState(true);
   const [activeModel, setActiveModel] = useState("experiment1");
   const [consensusTriggered, setConsensusTriggered] = useState(false);
+  const [escalateConfirmOpen, setEscalateConfirmOpen] = useState(false);
   const pendingPatchRef = useRef<Partial<CaseData>>({});
   const saveTimerRef = useRef<number | null>(null);
   const [autosaveState, setAutosaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -124,16 +134,22 @@ export function CaseReview() {
 
   useEffect(() => {
     if (!patientId) return;
+    let mounted = true;
     const fetchLedger = async () => {
       try {
         const rows = await api.getInferenceLedger(patientId, 1);
-        setLatestLedger(rows[0] || null);
+        if (mounted) setLatestLedger(rows[0] || null);
       } catch {
-        setLatestLedger(null);
+        if (mounted) setLatestLedger(null);
       }
     };
     fetchLedger();
-  }, [patientId, findings]);
+    return () => {
+      mounted = false;
+    };
+    // findings.length (not array identity) so the 10s findings poll does not
+    // re-fetch the ledger on every tick.
+  }, [patientId, findings.length]);
 
   useEffect(() => {
     const consensusState = String(latestLedger?.consensusState || "").toLowerCase();
@@ -141,18 +157,33 @@ export function CaseReview() {
   }, [latestLedger]);
 
   useEffect(() => {
-    if (!patientId || !caseData) return;
+    if (!patientId || loading) return;
     let mounted = true;
 
+    // Poll findings and AI-owned case fields together: analysis completes
+    // asynchronously server-side, so confidence/triage/report must refresh
+    // without clobbering fields the clinician is editing locally.
     const refreshFindings = async () => {
       setFindingsLoading(true);
       try {
-        const data = await api.getFindings(patientId);
+        const [data, serverCase] = await Promise.all([
+          api.getFindings(patientId),
+          api.getCase(patientId),
+        ]);
         if (!mounted) return;
         const sorted = [...data].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
         setFindings(sorted);
+        setCaseData((prev) => {
+          if (!prev) return serverCase;
+          const merged: CaseData = { ...prev, ...serverCase };
+          // Unsaved local edits win over the server snapshot.
+          for (const key of Object.keys(pendingPatchRef.current) as Array<keyof CaseData>) {
+            (merged as unknown as Record<string, unknown>)[key] = prev[key];
+          }
+          return merged;
+        });
       } catch {
-        if (mounted) setFindings([]);
+        // Keep the last known findings on transient fetch errors.
       } finally {
         if (mounted) setFindingsLoading(false);
       }
@@ -164,7 +195,7 @@ export function CaseReview() {
       mounted = false;
       clearInterval(timer);
     };
-  }, [patientId, caseData]);
+  }, [patientId, loading]);
 
   const fmtConfidence = (value?: number | null): number => {
     if (!value) return 0;
@@ -430,10 +461,15 @@ export function CaseReview() {
   const handleIsolate = async () => {
     if (!caseData) return;
     setActionLoading(true);
-    await api.updateCase(caseData.patientId, { triageColor: "red", priority: "urgent" });
-    const updated = await api.getCase(caseData.patientId);
-    setCaseData(updated);
-    setActionLoading(false);
+    try {
+      await api.updateCase(caseData.patientId, { triageColor: "red", priority: "urgent" });
+      setCaseData((prev) => (prev ? { ...prev, triageColor: "red", priority: "urgent" } : prev));
+      toast.success(`Case ${caseData.patientId} marked for isolation.`);
+    } catch {
+      toast.error("Failed to update isolation status.");
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const queueCaseAutosave = (patch: Partial<CaseData>) => {
@@ -522,6 +558,14 @@ export function CaseReview() {
     }
   };
 
+  const consensusAbortRef = useRef(false);
+  useEffect(() => {
+    consensusAbortRef.current = false;
+    return () => {
+      consensusAbortRef.current = true;
+    };
+  }, []);
+
   const runDualConsensus = async () => {
     if (!patientId || !caseData?.imagePath) return;
     setActionLoading(true);
@@ -536,10 +580,12 @@ export function CaseReview() {
 
       let final = job;
       for (let i = 0; i < 60; i += 1) {
+        if (consensusAbortRef.current) return;
         if (["completed", "failed", "cancelled"].includes(final.status)) break;
         await new Promise((resolve) => setTimeout(resolve, 1500));
         final = await api.getAnalyzeJob(job.jobId);
       }
+      if (consensusAbortRef.current) return;
 
       if (final.status === "completed") {
         toast.success("Dual-pipeline consensus run completed.");
@@ -560,7 +606,7 @@ export function CaseReview() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to run consensus");
     } finally {
-      setActionLoading(false);
+      if (!consensusAbortRef.current) setActionLoading(false);
     }
   };
 
@@ -617,7 +663,7 @@ export function CaseReview() {
             variant="outline"
             size="sm"
             className="h-8 text-xs px-3"
-            onClick={handleEscalate}
+            onClick={() => setEscalateConfirmOpen(true)}
             disabled={actionLoading}
           >
             <TrendingUp className="h-3.5 w-3.5 mr-1.5" />
@@ -676,6 +722,31 @@ export function CaseReview() {
 
   return (
     <div className="h-full flex flex-col bg-slate-50">
+      {/* Escalation requires explicit confirmation: it mutates triage state
+          and hands the case to the specialist queue. */}
+      <AlertDialog open={escalateConfirmOpen} onOpenChange={setEscalateConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Escalate to specialist queue?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Case {caseData.patientId} ({caseData.name}) will be marked as immediate priority
+              and sent to the specialist review queue.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setEscalateConfirmOpen(false);
+                handleEscalate();
+              }}
+            >
+              Escalate Case
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Main Content - 3 Column Layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Patient Context */}
@@ -895,7 +966,10 @@ export function CaseReview() {
                       onLoad={handleExp1ImageLoad}
                     />
                   ) : (
-                    <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-500">
+                      <FileText className="w-10 h-10" />
+                      <p className="text-sm">No radiograph available</p>
+                    </div>
                   )}
 
                   {showAnnotations && (
@@ -947,7 +1021,10 @@ export function CaseReview() {
                         onLoad={handleExp2ImageLoad}
                       />
                     ) : (
-                      <div className="absolute inset-0 flex items-center justify-center"><div className="w-16 h-16 border-4 border-slate-600 border-t-slate-400 rounded-full animate-spin"></div></div>
+                      <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-500">
+                      <FileText className="w-10 h-10" />
+                      <p className="text-sm">No radiograph available</p>
+                    </div>
                     )}
 
                     {showAnnotations && (
@@ -1328,9 +1405,6 @@ export function CaseReview() {
                 onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
                 className="flex-1"
               />
-              <Button size="icon" variant="outline">
-                <Mic className="h-4 w-4" />
-              </Button>
               <Button onClick={handleSendMessage} disabled={chatLoading || !chatInput.trim()}>
                 <Send className="h-4 w-4 mr-2" />
                 Send

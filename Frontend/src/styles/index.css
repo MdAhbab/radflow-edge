@@ -10,3 +10,16 @@
 #landing-scroll-area::-webkit-scrollbar {
   display: none;                /* Chrome / Safari / Webkit */
 }
+
+/* Respect the OS accessibility setting: collapse decorative motion for
+   users with vestibular sensitivity. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

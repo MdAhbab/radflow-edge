@@ -18,10 +18,7 @@ import {
   ArrowRight,
   Layers,
   ScanLine,
-  BarChart3,
   ExternalLink,
-  Zap,
-  Globe,
   Upload,
   Crosshair,
   Crop,
@@ -32,8 +29,6 @@ import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Badge } from "../ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { api, SystemStatus } from "../../../api";
- 
 
 /* ─────────────────────────────────────────────────────────
    SCROLL REVEAL – smooth cubic-bezier ease-out
@@ -100,14 +95,18 @@ function StatCounter({
 }) {
   const [count, setCount] = useState(0);
   useEffect(() => {
-    let start = 0;
-    const step = Math.ceil(value / (1800 / 16));
-    const timer = setInterval(() => {
-      start += step;
-      if (start >= value) { setCount(value); clearInterval(timer); }
-      else setCount(start);
-    }, 16);
-    return () => clearInterval(timer);
+    // requestAnimationFrame keeps the count-up off the timer queue and
+    // naturally pauses when the tab is hidden.
+    const duration = 1200;
+    const start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - start) / duration);
+      setCount(Math.round(value * progress));
+      if (progress < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
   }, [value]);
   return <span>{prefix}{count.toLocaleString()}{suffix}</span>;
 }
@@ -178,16 +177,6 @@ export function Welcome() {
   const navigate = useNavigate();
   const [isLogin, setIsLogin] = useState(true);
   const [scrolled, setScrolled] = useState(false);
-  const [mission, setMission] = useState<SystemStatus | null>(null);
-  
-  // Parallax state
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    const x = (e.clientX / window.innerWidth - 0.5) * 20;
-    const y = (e.clientY / window.innerHeight - 0.5) * 20;
-    setMousePos({ x, y });
-  };
 
   // Form state
   const [formData, setFormData] = useState({
@@ -208,18 +197,6 @@ export function Welcome() {
     return () => panel.removeEventListener("scroll", handler);
   }, []);
 
-  useEffect(() => {
-    const loadMission = async () => {
-      try {
-        const status = await api.getSystemStatus();
-        setMission(status);
-      } catch {
-        setMission(null);
-      }
-    };
-    loadMission();
-  }, []);
-
   const handleAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isLogin) {
@@ -227,9 +204,15 @@ export function Welcome() {
       localStorage.setItem("hsil_user_institute", formData.institute);
       localStorage.setItem("hsil_user_profession", formData.profession);
     } else {
-      localStorage.setItem("hsil_user_name", "Dr. Ahbab");
-      localStorage.setItem("hsil_user_institute", "Dhaka Medical College");
-      localStorage.setItem("hsil_user_profession", "specialist");
+      // Local-only demo session: derive a display name from the email
+      // instead of pretending a real account was looked up.
+      const emailName = formData.email.split("@")[0].replace(/[._-]+/g, " ").trim();
+      const displayName = emailName
+        ? emailName.replace(/\b\w/g, (c) => c.toUpperCase())
+        : "Clinical User";
+      localStorage.setItem("hsil_user_name", displayName);
+      localStorage.setItem("hsil_user_institute", "District Hospital");
+      localStorage.setItem("hsil_user_profession", "clinical_staff");
     }
     navigate("/dashboard");
   };
@@ -345,25 +328,17 @@ export function Welcome() {
         </header>
 
         {/* ── HERO ──────────────────────────────────────────────── */}
-        <section 
-          className="relative h-screen flex flex-col justify-between px-12 pt-20 pb-10 overflow-hidden"
-          onMouseMove={handleMouseMove}
-          style={{ perspective: "1000px" }}
-        >
-          <div 
-            className="absolute inset-0 -z-20 w-[110%] h-[110%] -left-[5%] -top-[5%] transition-transform duration-200 ease-out"
-            style={{ 
-              transform: `rotateY(${mousePos.x}deg) rotateX(${-mousePos.y}deg) translateZ(-50px)`,
-            }}
-          >
-            <video 
-              src="/hero.mp4" 
-              autoPlay 
-              loop 
-              muted 
+        <section className="relative h-screen flex flex-col justify-between px-12 pt-20 pb-10 overflow-hidden">
+          <div className="absolute inset-0 -z-20">
+            <video
+              src="/hero.mp4"
+              autoPlay
+              loop
+              muted
               playsInline
-              className="w-full h-full object-cover opacity-60" 
-              style={{ filter: "saturate(0.8) contrast(1.2)" }} 
+              preload="metadata"
+              className="w-full h-full object-cover opacity-60"
+              style={{ filter: "saturate(0.8) contrast(1.2)" }}
             />
           </div>
           <div className="absolute inset-0 -z-10 bg-gradient-to-b from-slate-950/80 via-slate-950/40 to-slate-950" />
@@ -375,9 +350,7 @@ export function Welcome() {
                 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
               >
                 Expert Radiology<br />
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-400">
-                  at the Last Mile.
-                </span>
+                <span className="text-blue-400">at the Last Mile.</span>
               </h1>
             </FadeIn>
 
@@ -566,9 +539,6 @@ export function Welcome() {
 
       {/* ── RIGHT PANEL – AUTH ──────────────────────────────────── */}
       <div className="w-[40%] shrink-0 h-full flex flex-col bg-white relative overflow-hidden shadow-[-24px_0_48px_-12px_rgba(0,0,0,0.4)] z-20">
-        <div className="absolute -top-24 -right-24 w-64 h-64 bg-blue-100 rounded-full blur-3xl opacity-40 pointer-events-none" />
-        <div className="absolute -bottom-20 -left-20 w-56 h-56 bg-teal-100 rounded-full blur-3xl opacity-30 pointer-events-none" />
-
         <div className="flex-1 overflow-y-auto flex flex-col justify-center px-10 py-8 relative z-10">
           <div className="max-w-[320px] w-full mx-auto">
 
@@ -589,7 +559,7 @@ export function Welcome() {
                 <span className="text-xs font-semibold text-slate-600 tracking-wide">Clinical Portal</span>
               </div>
               <h2
-                className="text-2xl font-bold text-slate-900 tracking-tight leading-tight"
+                className="text-2xl font-bold text-slate-900 tracking-tight leading-tight whitespace-pre-line"
                 style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}
               >
                 {isLogin ? "Sign in to your\nclinical workspace." : "Join the\nclinical network."}

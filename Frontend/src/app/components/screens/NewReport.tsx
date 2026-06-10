@@ -1,13 +1,23 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { Upload, FileImage, ClipboardList, Loader2, Link as LinkIcon, CheckCircle2 } from "lucide-react";
+import { Upload, FileImage, ClipboardList, Loader2, Link as LinkIcon } from "lucide-react";
 import { api } from "../../../api";
 import { toast } from "sonner";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { Textarea } from "../ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 
 export function NewReport() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
   const [linkLoading, setLinkLoading] = useState(false);
   const [linkedPatientFound, setLinkedPatientFound] = useState(false);
   const [formData, setFormData] = useState({
@@ -19,17 +29,30 @@ export function NewReport() {
   });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const previewUrlRef = useRef<string | null>(null);
+
+  // Object URLs must be revoked or each selected file leaks until reload.
+  const setPreviewUrl = (url: string | null) => {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = url;
+    setPreview(url);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const file = e.target.files[0];
       setSelectedFile(file);
-      const url = URL.createObjectURL(file);
-      setPreview(url);
+      setPreviewUrl(URL.createObjectURL(file));
     }
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
@@ -67,7 +90,7 @@ export function NewReport() {
       }));
       setLinkedPatientFound(true);
       toast.success(`Loaded patient details for ${linkedId}.`);
-    } catch (err) {
+    } catch {
       toast.error("Patient ID not found in database.");
     } finally {
       setLinkLoading(false);
@@ -77,19 +100,18 @@ export function NewReport() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedFile) {
-      alert("Please upload an image for the report.");
+      toast.error("Please upload a radiograph image for the report.");
       return;
     }
 
     setLoading(true);
-    setSuccess(false);
 
     try {
-      // 1. Upload to .files
       const uploadedPath = await api.uploadFile(selectedFile);
 
-      // 2. Create the case in the DB
-      const newCaseData = {
+      // Analysis runs asynchronously server-side; the case review screen
+      // polls findings until the pipeline completes.
+      const createdCase = await api.createCase({
         name: formData.name,
         age: parseInt(formData.age) || 0,
         sex: normalizeSexForAPI(formData.sex),
@@ -98,40 +120,19 @@ export function NewReport() {
         aiStatus: "ready" as const,
         triageColor: "green" as const,
         confidence: 0,
-        patientId: formData.patientIdLinked || undefined 
-      };
-
-      let createdCase = await api.createCase(newCaseData);
-
-      // If auto-analysis on the server did not finish (aiStatus still "ready"), run full pipeline once.
-      if (createdCase.aiStatus === "ready" && createdCase.imagePath) {
-        try {
-          await api.analyzeXray({
-            imagePath: createdCase.imagePath,
-            patientId: createdCase.patientId,
-            patientContext: `${createdCase.age}${createdCase.sex}, complaint: ${createdCase.complaint}`,
-            userAction: "new_report_fallback",
-          });
-          createdCase = await api.getCase(createdCase.patientId);
-        } catch (fallbackErr) {
-          console.error("Analyze fallback:", fallbackErr);
-          toast.warning("Report saved. AI analysis will complete when you open the case.");
-        }
-      }
+        patientId: formData.patientIdLinked || undefined,
+      });
 
       localStorage.setItem("hsil_last_viewed_case", createdCase.patientId);
-      
-      setSuccess(true);
-      setFormData({ name: "", age: "", sex: "Male", complaint: "", patientIdLinked: "" });
-      setSelectedFile(null);
-      setPreview(null);
+      setPreviewUrl(null);
+      toast.success("Report submitted. AI analysis is running.");
       navigate(`/dashboard/case/${createdCase.patientId}`);
-    } catch (err: any) {
-      console.error("Submission error:", err);
-      if (err.message?.includes("Failed to fetch") || err.message?.includes("NetworkError")) {
-          alert("Connection Error: The backend server appears to be offline. Please verify that the system is running and try again.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      if (/fetch|network/i.test(message)) {
+        toast.error("Connection error: the backend appears to be offline. Verify the system is running and try again.");
       } else {
-          alert(`Failed to submit: ${err.message || "Unknown error"}`);
+        toast.error(`Failed to submit: ${message}`);
       }
     } finally {
       setLoading(false);
@@ -151,30 +152,23 @@ export function NewReport() {
           </div>
         </div>
 
-        {success && (
-          <div className="m-6 bg-green-50 text-green-800 p-4 rounded-lg flex items-center gap-3 border border-green-100 animate-in fade-in slide-in-from-top-4">
-            <CheckCircle2 className="w-5 h-5 text-green-600" />
-            <p className="font-medium">Successfully processed and queued initial report!</p>
-          </div>
-        )}
-
         <form onSubmit={handleSubmit} className="p-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            
+
             {/* Left Column: File Upload */}
             <div className="space-y-4">
               <h3 className="font-medium text-slate-700 flex items-center gap-2">
                 <FileImage className="w-4 h-4" />
                 Image Upload
               </h3>
-              
-              <div 
+
+              <div
                 className="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center bg-slate-50 hover:bg-slate-100 transition-colors relative cursor-pointer flex flex-col items-center justify-center min-h-[300px]"
                 onClick={() => document.getElementById("file-upload")?.click()}
               >
                 {preview ? (
                   <div className="relative w-full h-full min-h-[250px] flex items-center justify-center">
-                    <img src={preview} alt="Preview" className="max-h-[300px] object-contain rounded-lg" />
+                    <img src={preview} alt="Selected radiograph preview" className="max-h-[300px] object-contain rounded-lg" />
                     <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 flex items-center justify-center transition-opacity rounded-lg">
                       <p className="text-white font-medium">Click to change image</p>
                     </div>
@@ -183,14 +177,14 @@ export function NewReport() {
                   <>
                     <Upload className="w-10 h-10 text-slate-400 mb-3" />
                     <p className="font-medium text-slate-700">Click to Browse</p>
-                    <p className="text-xs text-slate-500 mt-1">PNG, JPG, DICOM up to 20MB</p>
+                    <p className="text-xs text-slate-500 mt-1">PNG, JPG, DICOM up to 50MB</p>
                   </>
                 )}
-                <input 
-                  type="file" 
-                  id="file-upload" 
-                  accept="image/png, image/jpeg, application/dicom" 
-                  className="hidden" 
+                <input
+                  type="file"
+                  id="file-upload"
+                  accept="image/png, image/jpeg, application/dicom"
+                  className="hidden"
                   onChange={handleFileChange}
                 />
               </div>
@@ -198,126 +192,101 @@ export function NewReport() {
 
             {/* Right Column: Patient Data */}
             <div className="space-y-5">
-              <h3 className="font-medium text-slate-700 flex items-center gap-2">
-                Patient Origin Information
-              </h3>
+              <h3 className="font-medium text-slate-700">Patient Origin Information</h3>
 
               {/* Link Patient ID */}
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Link to Previous Patient ID (Optional)
-                </label>
-                <div className="relative flex gap-2">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                    <LinkIcon className="h-4 w-4 text-slate-400" />
+              <div className="space-y-1.5">
+                <Label htmlFor="patientIdLinked">Link to Previous Patient ID (Optional)</Label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <LinkIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
+                    <Input
+                      id="patientIdLinked"
+                      name="patientIdLinked"
+                      value={formData.patientIdLinked}
+                      onChange={handleChange}
+                      placeholder="e.g. PT-BD-001"
+                      className="pl-10"
+                    />
                   </div>
-                  <input 
-                    type="text" 
-                    name="patientIdLinked"
-                    value={formData.patientIdLinked}
-                    onChange={handleChange}
-                    placeholder="e.g. PT-BD-001"
-                    className="block w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleLoadLinkedPatient}
-                    disabled={linkLoading}
-                    className="px-3 py-2 border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                  >
+                  <Button type="button" variant="outline" onClick={handleLoadLinkedPatient} disabled={linkLoading}>
                     {linkLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Load"}
-                  </button>
+                  </Button>
                 </div>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500">
                   Leave blank to assign a new ID. Use Load to prefill details from DB.
                 </p>
                 {linkedPatientFound && (
-                  <p className="text-xs text-emerald-600 mt-1">Existing patient details loaded and ready for edit.</p>
+                  <p className="text-xs text-emerald-600">Existing patient details loaded and ready for edit.</p>
                 )}
               </div>
 
               <hr className="border-slate-100" />
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Full Name</label>
-                  <input 
-                    type="text" 
-                    name="name"
-                    required
-                    value={formData.name}
-                    onChange={handleChange}
-                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Age</label>
-                  <input 
-                    type="number" 
-                    name="age"
-                    required
-                    value={formData.age}
-                    onChange={handleChange}
-                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  />
+                <div className="space-y-1.5">
+                  <Label htmlFor="patient-name">Full Name</Label>
+                  <Input id="patient-name" name="name" required value={formData.name} onChange={handleChange} />
                 </div>
 
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Biological Sex</label>
-                  <select 
-                    name="sex"
-                    value={formData.sex}
-                    onChange={handleChange}
-                    className="block w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  >
-                    <option>Male</option>
-                    <option>Female</option>
-                    <option>Other</option>
-                  </select>
+                <div className="space-y-1.5">
+                  <Label htmlFor="patient-age">Age</Label>
+                  <Input id="patient-age" type="number" name="age" required min={0} max={130} value={formData.age} onChange={handleChange} />
+                </div>
+
+                <div className="col-span-2 space-y-1.5">
+                  <Label htmlFor="patient-sex">Biological Sex</Label>
+                  <Select value={formData.sex} onValueChange={(value) => setFormData(prev => ({ ...prev, sex: value }))}>
+                    <SelectTrigger id="patient-sex" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Male">Male</SelectItem>
+                      <SelectItem value="Female">Female</SelectItem>
+                      <SelectItem value="Other">Other</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Presenting Complaint</label>
-                <textarea 
+              <div className="space-y-1.5">
+                <Label htmlFor="patient-complaint">Presenting Complaint</Label>
+                <Textarea
+                  id="patient-complaint"
                   name="complaint"
                   rows={3}
                   required
                   value={formData.complaint}
                   onChange={handleChange}
-                  className="block w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 sm:text-sm resize-none"
+                  className="resize-none"
                   placeholder="e.g. Persistent cough, chest pain, fever..."
-                ></textarea>
+                />
               </div>
 
             </div>
           </div>
 
-          <div className="mt-8 pt-6 border-t border-slate-100 flex justify-end">
-            <button
+          <div className="mt-8 pt-6 border-t border-slate-100 flex justify-end gap-3">
+            <Button
               type="button"
-              className="px-5 py-2.5 border border-slate-300 font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 mr-3"
+              variant="outline"
               disabled={loading}
               onClick={() => {
                 setFormData({ name: "", age: "", sex: "Male", complaint: "", patientIdLinked: "" });
                 setSelectedFile(null);
-                setPreview(null);
+                setPreviewUrl(null);
+                setLinkedPatientFound(false);
               }}
             >
               Clear
-            </button>
-            <button
-              type="submit"
-              disabled={loading || !selectedFile}
-              className="px-5 py-2.5 border border-transparent font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
+            </Button>
+            <Button type="submit" disabled={loading || !selectedFile}>
               {loading ? (
                 <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</>
               ) : (
                 "Submit Report to Queue"
               )}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
