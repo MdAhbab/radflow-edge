@@ -7,11 +7,14 @@ class XRayLocalizer:
     def __init__(self, model):
         self.model = model
         self.target_layer = [model.features[-1]]
+        # One GradCAM for the localizer's lifetime: each construction
+        # registers forward/backward hooks on the model that are never
+        # released, so per-call instances accumulate hooks and leak memory.
+        self.cam = GradCAM(model=self.model, target_layers=self.target_layer)
 
     def get_heatmap(self, img_tensor, disease_index):
-        cam = GradCAM(model=self.model, target_layers=self.target_layer)
         targets = [ClassifierOutputTarget(disease_index)]
-        return cam(input_tensor=img_tensor, targets=targets)[0]
+        return self.cam(input_tensor=img_tensor, targets=targets)[0]
 
     def heatmap_to_bboxes(self, heatmap, threshold=0.4):
         binary = (heatmap > threshold).astype(np.uint8)

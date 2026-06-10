@@ -53,6 +53,7 @@ aiofiles
 # Utilities
 pydantic>=2.0
 python-dotenv
+psutil
 tqdm
 requests
 sqlalchemy

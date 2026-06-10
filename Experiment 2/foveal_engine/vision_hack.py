@@ -18,6 +18,8 @@ class FovealPreprocessor:
 
         # Read in Grayscale
         img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError(f"Unable to read image: {image_path}")
         orig_h, orig_w = img.shape
         
         # 1. Global Context Thumbnail

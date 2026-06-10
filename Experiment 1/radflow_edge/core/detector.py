@@ -33,11 +33,14 @@ class XRayDetector:
             dcm = pydicom.dcmread(path)
             img = dcm.pixel_array.astype(float)
         else:
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(float)
-            
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise ValueError(f"Unable to read image: {path}")
+            img = img.astype(float)
+
         img = xrv.datasets.normalize(img, 255)
         img = cv2.resize(img, (224, 224))
-        return torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0)
+        return torch.from_numpy(img).float().unsqueeze(0).unsqueeze(0).to(self.device)
 
     def detect(self, image_path, threshold=0.3):
         img_tensor = self.load_image(image_path)

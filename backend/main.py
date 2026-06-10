@@ -83,12 +83,20 @@ RECENT_ERROR_COUNT = 0
 ACTIVE_USER_WINDOW_SECONDS = 300
 REQUEST_ACTIVITY: Dict[str, datetime] = {}
 
-# Endpoint telemetry and reliability metrics.
+# Endpoint telemetry and reliability metrics. Keys are route templates
+# (e.g. "GET /api/v1/cases/{patient_id}"), capped so unmatched paths cannot
+# grow these maps without bound on a long-running device.
 ENDPOINT_METRICS: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0, "errors": 0, "total_ms": 0, "max_ms": 0})
 OBS_LATENCY_WINDOWS: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+ENDPOINT_METRICS_MAX_KEYS = 200
 INFERENCE_QUEUE: "queue.Queue[str]" = queue.Queue()
 INFERENCE_WORKER_STARTED = False
 INFERENCE_WORKER_LOCK = threading.Lock()
+
+# Model inference is serialized: concurrent torch runs on shared-memory edge
+# hardware multiply peak RSS and push macOS into swap. RLock because consensus
+# re-enters the experiment runners within one logical analysis.
+PIPELINE_LOCK = threading.RLock()
 
 # Configurable triage policy rules (can be replaced per-hospital).
 POLICY_RULES: Dict[str, Any] = {
@@ -152,7 +160,6 @@ async def activity_middleware(request: Request, call_next):
     client_host = request.client.host if request.client else "unknown"
     now = datetime.utcnow()
     REQUEST_ACTIVITY[client_host] = now
-    path_key = f"{request.method} {request.url.path}"
     t0 = time.perf_counter()
 
     # Prune stale activity entries to keep active users meaningful.
@@ -163,13 +170,20 @@ async def activity_middleware(request: Request, call_next):
 
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    metric = ENDPOINT_METRICS[path_key]
-    metric["count"] += 1
-    metric["total_ms"] += elapsed_ms
-    metric["max_ms"] = max(metric["max_ms"], elapsed_ms)
-    if response.status_code >= 400:
-        metric["errors"] += 1
-    OBS_LATENCY_WINDOWS[path_key].append(elapsed_ms)
+
+    # Key metrics by route template, not the concrete URL, so per-patient
+    # paths collapse into one bucket instead of accumulating forever.
+    route = request.scope.get("route")
+    path_template = getattr(route, "path", None) or request.url.path
+    path_key = f"{request.method} {path_template}"
+    if path_key in ENDPOINT_METRICS or len(ENDPOINT_METRICS) < ENDPOINT_METRICS_MAX_KEYS:
+        metric = ENDPOINT_METRICS[path_key]
+        metric["count"] += 1
+        metric["total_ms"] += elapsed_ms
+        metric["max_ms"] = max(metric["max_ms"], elapsed_ms)
+        if response.status_code >= 400:
+            metric["errors"] += 1
+        OBS_LATENCY_WINDOWS[path_key].append(elapsed_ms)
     return response
 
 
@@ -177,12 +191,23 @@ async def activity_middleware(request: Request, call_next):
 async def global_exception_handler(request: Request, exc: Exception):
     global RECENT_ERROR_COUNT
     RECENT_ERROR_COUNT += 1
-    print(f"CRITICAL ERROR: {exc}")
+    error_id = uuid.uuid4().hex[:12]
+    print(f"CRITICAL ERROR [{error_id}] {request.method} {request.url.path}: {exc}")
     traceback.print_exc()
+    _write_event("unhandled_error", {"errorId": error_id, "path": request.url.path, "error": str(exc)[:500]})
+    # Internals stay in the server log; clients get a correlation id only.
     return JSONResponse(
         status_code=500,
-        content={"message": "Internal Server Error", "detail": str(exc)},
+        content={"message": "Internal Server Error", "errorId": error_id},
     )
+
+
+def _format_time_waiting(created_at: Optional[datetime]) -> str:
+    if not created_at:
+        return "0h 0m"
+    total_minutes = max(0, int((datetime.utcnow() - created_at).total_seconds() // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h {minutes}m"
 
 
 def _format_uptime(delta: timedelta) -> str:
@@ -931,6 +956,11 @@ def _get_exp1_analyzer_optional():
 
 
 def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, Any]:
+    with PIPELINE_LOCK:
+        return _run_experiment1_locked(image_path, patient_context)
+
+
+def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[str, Any]:
     start_ts = time.perf_counter()
 
     detector, localizer = _get_exp1_components()
@@ -1036,6 +1066,28 @@ def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, An
         except Exception as ex:
             analyzer_state = f"error: {ex}"
 
+    if finding_items[0].get("report") is None:
+        narrative_start = time.perf_counter()
+        gemma_text = _gemma_narrative_report(
+            crops[0]["image"] if crops else None,
+            image_path,
+            disease,
+            float(confidence),
+            patient_context,
+        )
+        if gemma_text:
+            analysis_ms = (time.perf_counter() - narrative_start) * 1000.0
+            differential_diagnosis = (
+                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+                or differential_diagnosis
+            )
+            recommended_steps = (
+                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["future_steps"])
+                or recommended_steps
+            )
+            finding_items[0]["report"] = gemma_text
+            analyzer_state = f"local_llm:{_get_local_llm_model()}"
+
     triage_color, priority = _priority_from_confidence(float(confidence))
     report_text = finding_items[0].get("report") or (
         f"Top finding: {disease} ({float(confidence):.2f}). "
@@ -1100,6 +1152,11 @@ def _load_module_from_file(module_name: str, file_path: str):
 
 
 def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, Any]:
+    with PIPELINE_LOCK:
+        return _run_experiment2_locked(image_path, patient_context)
+
+
+def _run_experiment2_locked(image_path: str, patient_context: str = "") -> Dict[str, Any]:
     import cv2
 
     start_ts = time.perf_counter()
@@ -1226,6 +1283,31 @@ def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, An
             analyzer_state = "loaded"
         except Exception as ex:
             analyzer_state = f"error: {ex}"
+
+    if analyzer_state != "loaded" and confidence > 0:
+        narrative_start = time.perf_counter()
+        narrative_input = detail_crop
+        if narrative_input is None:
+            narrative_input = cv2.cvtColor(crop_img, cv2.COLOR_GRAY2BGR)
+        gemma_text = _gemma_narrative_report(
+            narrative_input,
+            image_path,
+            disease,
+            float(confidence),
+            patient_context,
+        )
+        if gemma_text:
+            analysis_ms = (time.perf_counter() - narrative_start) * 1000.0
+            differential_diagnosis = (
+                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+                or differential_diagnosis
+            )
+            recommended_steps = (
+                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["future_steps"])
+                or recommended_steps
+            )
+            report = gemma_text
+            analyzer_state = f"local_llm:{_get_local_llm_model()}"
 
     triage_color, priority = _priority_from_confidence(float(confidence))
     total_ms = (time.perf_counter() - start_ts) * 1000.0
@@ -1483,42 +1565,28 @@ def _ensure_findings_for_case(patient_id: str, db: Session) -> List[Finding]:
     if not db_case:
         return []
 
+    # An analysis job is already in flight; let the client keep polling
+    # instead of synthesizing a placeholder finding it would then trust.
+    if db_case.ai_status == "analyzing":
+        return []
+
     resolved_path = _resolve_image_path(db_case.image_path)
     if resolved_path and os.path.exists(resolved_path) and active_ai_model != "none":
-        previous_confidence = float(db_case.confidence or 0.0)
-        previous_report = db_case.ai_draft_report
-        previous_complaint = db_case.complaint
-        try:
-            patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
-            analysis = _run_active_pipeline(resolved_path, patient_context)
-            _apply_analysis_to_case(db_case, analysis, db)
-            refreshed = db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
-            if not refreshed:
-                synthetic_confidence = max(previous_confidence, float(analysis.get("confidence", 0.0) or 0.0))
-                synthetic_disease = (
-                    str(analysis.get("summary") or previous_complaint or "legacy finding").strip()[:100]
-                )
-                db.add(
-                    Finding(
-                        case_id=db_case.patient_id,
-                        disease=synthetic_disease or "legacy finding",
-                        confidence=synthetic_confidence,
-                        bbox_x1=None,
-                        bbox_y1=None,
-                        bbox_x2=None,
-                        bbox_y2=None,
-                        report=str(analysis.get("aiDraftReport") or previous_report or ""),
-                        source_engine=str(analysis.get("engine") or "") or None,
-                    )
-                )
-                db.commit()
-        except Exception as ex:
-            print(f"Legacy findings backfill failed for {patient_id}: {ex}")
-            traceback.print_exc()
-            _bootstrap_legacy_finding_if_possible(db_case, db)
-    else:
-        _bootstrap_legacy_finding_if_possible(db_case, db)
+        # Reads must stay cheap: queue the heavy backfill instead of running
+        # the model pipeline inside a GET request.
+        patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
+        db_case.ai_status = "analyzing"
+        db.commit()
+        _enqueue_analysis_job(
+            db,
+            image_path=resolved_path,
+            patient_id=db_case.patient_id,
+            patient_context=patient_context,
+            user_action="legacy_backfill",
+        )
+        return []
 
+    _bootstrap_legacy_finding_if_possible(db_case, db)
     return db.query(Finding).filter(Finding.case_id == patient_id, Finding.is_deleted == 0).all()
 
 # Pydantic Schemas
@@ -1640,6 +1708,7 @@ class EscalationUpdateSchema(BaseModel):
     status: Optional[str] = None
     assignedTo: Optional[str] = None
     specialistNotes: Optional[str] = None
+    clearAssignedTo: Optional[bool] = False
 
 class StatsResponse(BaseModel):
     newCases: int
@@ -1918,6 +1987,18 @@ def _inference_worker_loop() -> None:
                     job.status = "failed"
                     job.progress = 100
                     job.finished_at = datetime.utcnow()
+                    # Release the case from "analyzing" so it doesn't hang in
+                    # the worklist after a terminal failure.
+                    if job.case_id:
+                        stuck_case = (
+                            db.query(Case)
+                            .filter(Case.patient_id == job.case_id, Case.is_deleted == 0)
+                            .order_by(Case.id.desc())
+                            .first()
+                        )
+                        if stuck_case is not None and stuck_case.ai_status == "analyzing":
+                            stuck_case.ai_status = "ready"
+                            stuck_case.ai_draft_report = f"Analysis failed: {str(ex)[:300]}"
                     db.commit()
         finally:
             try:
@@ -1935,6 +2016,40 @@ def _ensure_inference_worker() -> None:
         worker = threading.Thread(target=_inference_worker_loop, daemon=True)
         worker.start()
         INFERENCE_WORKER_STARTED = True
+
+
+def _enqueue_analysis_job(
+    db: Session,
+    image_path: str,
+    patient_id: Optional[str],
+    patient_context: str,
+    user_action: str,
+    force_consensus: bool = False,
+) -> InferenceJob:
+    _ensure_inference_worker()
+    row = InferenceJob(
+        job_id=uuid.uuid4().hex,
+        case_id=patient_id,
+        image_path=image_path,
+        pipeline_mode=active_ai_model,
+        status="queued",
+        progress=0,
+        attempts=0,
+        max_retries=2,
+        cancel_requested=0,
+        result_json=json.dumps(
+            {
+                "patientContext": patient_context,
+                "userAction": user_action,
+                "forceConsensus": force_consensus,
+            }
+        ),
+    )
+    db.add(row)
+    db.commit()
+    INFERENCE_QUEUE.put(row.job_id)
+    _write_event("job_created", {"jobId": row.job_id, "caseId": patient_id, "mode": active_ai_model})
+    return row
 
 
 @app.get("/api/v1/cases", response_model=List[CaseFrontendSchema])
@@ -2105,32 +2220,14 @@ def create_analyze_job(payload: AnalyzeJobRequest, db: Session = Depends(get_db)
     if not image_path or not os.path.exists(image_path):
         raise HTTPException(status_code=400, detail="Valid imagePath is required")
 
-    _ensure_inference_worker()
-    job_id = uuid.uuid4().hex
-
-    row = InferenceJob(
-        job_id=job_id,
-        case_id=payload.patientId,
+    row = _enqueue_analysis_job(
+        db,
         image_path=image_path,
-        pipeline_mode=active_ai_model,
-        status="queued",
-        progress=0,
-        attempts=0,
-        max_retries=2,
-        cancel_requested=0,
-        result_json=json.dumps(
-            {
-                "patientContext": payload.patientContext or "",
-                "userAction": payload.userAction or "async_analyze",
-                "forceConsensus": payload.forceConsensus,
-            }
-        ),
+        patient_id=payload.patientId,
+        patient_context=payload.patientContext or "",
+        user_action=payload.userAction or "async_analyze",
+        force_consensus=payload.forceConsensus,
     )
-    db.add(row)
-    db.commit()
-
-    INFERENCE_QUEUE.put(job_id)
-    _write_event("job_created", {"jobId": job_id, "caseId": payload.patientId, "mode": active_ai_model})
     return _job_row_to_status(row)
 
 
@@ -2348,27 +2445,20 @@ def create_case(case: CaseCreateSchema, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_case)
 
-    # Auto-run analysis on case creation when image exists and AI is enabled.
+    # Queue analysis asynchronously so case creation returns immediately;
+    # the worker thread updates the case when inference completes.
     resolved_path = _resolve_image_path(db_case.image_path)
     if resolved_path and os.path.exists(resolved_path) and active_ai_model != "none":
-        case_patient_id = db_case.patient_id
-        case_row_id = db_case.id
-        try:
-            patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
-            analysis = _run_active_pipeline(resolved_path, patient_context)
-            _apply_analysis_to_case(db_case, analysis, db)
-            db.refresh(db_case)
-        except Exception as ex:
-            print(f"Auto-analysis failed for {case_patient_id}: {ex}")
-            traceback.print_exc()
-            db.rollback()
-
-            # The case may have been removed while analysis was running.
-            existing_case = db.query(Case).filter(Case.id == case_row_id, Case.is_deleted == 0).first()
-            if existing_case is not None:
-                existing_case.ai_status = "ready"
-                existing_case.ai_draft_report = f"Analysis failed: {ex}"
-                db.commit()
+        patient_context = f"{db_case.age}{db_case.sex}, complaint: {db_case.complaint}"
+        db_case.ai_status = "analyzing"
+        db.commit()
+        _enqueue_analysis_job(
+            db,
+            image_path=resolved_path,
+            patient_id=db_case.patient_id,
+            patient_context=patient_context,
+            user_action="case_created",
+        )
 
     # Re-fetch as the Frontend Schema to ensure proper serialization
     return get_case(db_case.patient_id, db=db)
@@ -2385,29 +2475,99 @@ def update_case(patient_id: str, case: CaseUpdateSchema, db: Session = Depends(g
     return {"status": "updated"}
 
 
+class ReportDownloadRequest(BaseModel):
+    specialistNotes: Optional[str] = None
+
+
+@app.post("/api/v1/cases/{patient_id}/download")
+def download_case_report(patient_id: str, payload: ReportDownloadRequest, db: Session = Depends(get_db)):
+    c = db.query(Case).filter(Case.patient_id == patient_id, Case.is_deleted == 0).order_by(Case.id.desc()).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    findings = (
+        db.query(Finding)
+        .filter(Finding.case_id == patient_id, Finding.is_deleted == 0)
+        .order_by(Finding.confidence.desc())
+        .all()
+    )
+
+    lines: List[str] = [
+        "RADFLOW-EDGE PRELIMINARY RADIOLOGY REPORT",
+        "=" * 48,
+        f"Patient ID:    {c.patient_id}",
+        f"Name:          {c.name}",
+        f"Age/Sex:       {c.age} / {c.sex}",
+        f"Study:         {c.study_type}",
+        f"Complaint:     {c.complaint}",
+        f"Triage:        {str(c.triage_color or 'green').upper()}  |  Priority: {c.priority or 'routine'}",
+        f"AI Confidence: {round(float(c.confidence or 0.0) * 100, 1)}%",
+        f"Generated:     {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
+        "",
+    ]
+
+    vitals = [
+        ("Temp", c.vital_temp, "°C"),
+        ("HR", c.vital_hr, "bpm"),
+        ("BP", c.vital_bp, ""),
+        ("Resp", c.vital_resp, "/min"),
+        ("SpO2", c.vital_spo2, "%"),
+        ("Weight", c.vital_weight, "kg"),
+    ]
+    vital_parts = [f"{label}: {value}{unit}" for label, value, unit in vitals if value is not None]
+    if vital_parts:
+        lines += ["VITALS", "-" * 48, "  |  ".join(vital_parts), ""]
+
+    if findings:
+        lines += ["AI FINDINGS", "-" * 48]
+        for f in findings:
+            bbox = ""
+            if f.bbox_x1 is not None:
+                bbox = f"  bbox=({f.bbox_x1},{f.bbox_y1},{f.bbox_x2},{f.bbox_y2})"
+            lines.append(f"- {f.disease} ({round(float(f.confidence or 0.0) * 100, 1)}%){bbox}")
+        lines.append("")
+
+    if c.ai_draft_report:
+        lines += ["DRAFT REPORT", "-" * 48, c.ai_draft_report.strip(), ""]
+
+    notes = _clean_optional_text(payload.specialistNotes)
+    if notes:
+        lines += ["SPECIALIST NOTES", "-" * 48, notes, ""]
+
+    lines += [
+        "-" * 48,
+        "Draft preliminary findings generated by clinical decision support.",
+        "Final interpretation requires review by a qualified clinician.",
+    ]
+
+    filename = f"radflow_report_{patient_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.txt"
+    return {"content": "\n".join(lines), "filename": filename}
+
+
 @app.get("/api/v1/escalations", response_model=List[EscalationSchema])
 def get_escalations(status: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(Escalation).filter(Escalation.is_deleted == 0)
     if status:
         query = query.filter(Escalation.status == status)
     db_esc = query.all()
-    result = []
-    for e in db_esc:
-        result.append(EscalationSchema(
-            patientId=e.patient_id,
-            name=e.name,
-            age=e.age,
-            sex=e.sex,
-            reasonForEscalation=e.reason_for_escalation,
-            priority=e.priority,
-            aiTriage=e.ai_triage,
-            confidence=e.confidence,
-            timeWaiting=e.time_waiting,
-            status=e.status,
-            assignedTo=e.assigned_to,
-            specialistNotes=e.specialist_notes,
-        ))
-    return result
+    return [_escalation_to_schema(e) for e in db_esc]
+
+
+def _escalation_to_schema(e: Escalation) -> EscalationSchema:
+    return EscalationSchema(
+        patientId=e.patient_id,
+        name=e.name,
+        age=e.age,
+        sex=e.sex,
+        reasonForEscalation=e.reason_for_escalation,
+        priority=e.priority,
+        aiTriage=e.ai_triage,
+        confidence=e.confidence,
+        timeWaiting=_format_time_waiting(e.created_at),
+        status=e.status,
+        assignedTo=e.assigned_to,
+        specialistNotes=e.specialist_notes,
+    )
 
 @app.post("/api/v1/escalations", response_model=EscalationSchema)
 def create_escalation(esc: EscalationCreateSchema, db: Session = Depends(get_db)):
@@ -2432,7 +2592,8 @@ def create_escalation(esc: EscalationCreateSchema, db: Session = Depends(get_db)
         )
     )
     db.commit()
-    return get_escalations(db=db)[-1]  # roughly getting the mapped item back
+    db.refresh(db_esc)
+    return _escalation_to_schema(db_esc)
 
 @app.get("/api/v1/escalations/stats")
 def get_escalation_stats(db: Session = Depends(get_db)):
@@ -2450,13 +2611,17 @@ def update_escalation(patient_id: str, esc: EscalationUpdateSchema, db: Session 
     old_status = db_esc.status
     if esc.status is not None:
         db_esc.status = esc.status
-    if esc.assignedTo is not None:
+    if esc.clearAssignedTo:
+        db_esc.assigned_to = None
+    elif esc.assignedTo is not None:
         db_esc.assigned_to = esc.assignedTo
     if esc.specialistNotes is not None:
         db_esc.specialist_notes = esc.specialistNotes
-    if esc.status is not None or esc.assignedTo is not None or esc.specialistNotes is not None:
+    if esc.status is not None or esc.assignedTo is not None or esc.specialistNotes is not None or esc.clearAssignedTo:
         reason_parts: List[str] = []
-        if esc.assignedTo is not None:
+        if esc.clearAssignedTo:
+            reason_parts.append("assignment_cleared")
+        elif esc.assignedTo is not None:
             reason_parts.append(f"assigned_to:{esc.assignedTo}")
         if esc.specialistNotes is not None:
             reason_parts.append("specialist_note_updated")
@@ -2718,48 +2883,119 @@ def _truncate_prompt_text(text: Optional[str], max_len: int = 1500) -> str:
     return cleaned[:max_len] + "..."
 
 
-def _get_preferred_copilot_model() -> str:
+# Gemma 4 E2B (via Ollama) is the single local LLM for every text/vision task
+# the detector pipeline does not cover: copilot chat and report narratives.
+def _get_local_llm_model() -> str:
     return os.getenv("HSIL_COPILOT_MODEL", "gemma4:e2b")
 
 
-def _pick_available_ollama_model(preferred: str, base_url: str) -> str:
+def _get_ollama_base_url() -> str:
+    return os.getenv("HSIL_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+
+
+_OLLAMA_AVAILABILITY: Dict[str, Any] = {"checked_at": 0.0, "available": False}
+_OLLAMA_AVAILABILITY_TTL_SEC = 60.0
+
+
+def _is_local_llm_available() -> bool:
+    now = time.monotonic()
+    if now - _OLLAMA_AVAILABILITY["checked_at"] < _OLLAMA_AVAILABILITY_TTL_SEC:
+        return bool(_OLLAMA_AVAILABILITY["available"])
+
+    available = False
     try:
-        resp = requests.get(f"{base_url}/api/tags", timeout=3)
+        resp = requests.get(f"{_get_ollama_base_url()}/api/tags", timeout=2)
         resp.raise_for_status()
-        payload = resp.json()
-        names = [str(item.get("name") or "") for item in payload.get("models", []) if item.get("name")]
-        lower_names = [name.lower() for name in names]
-
-        preferred_l = preferred.lower()
-        if preferred_l in lower_names:
-            return names[lower_names.index(preferred_l)]
-
-        candidates = [
-            "gemma4:e2b",
-            "gemma3n:e2b",
-            "gemma3:2b",
-            "gemma2:2b",
-            "gemma:2b",
-        ]
-        for cand in candidates:
-            if cand in lower_names:
-                return names[lower_names.index(cand)]
-
-        for idx, name in enumerate(lower_names):
-            if "gemma" in name and ("e2b" in name or "2b" in name):
-                return names[idx]
-        for idx, name in enumerate(lower_names):
-            if "gemma" in name:
-                return names[idx]
+        wanted = _get_local_llm_model().lower()
+        names = [str(item.get("name") or "").lower() for item in resp.json().get("models", [])]
+        available = wanted in names
     except Exception:
-        pass
-    return preferred
+        available = False
+
+    _OLLAMA_AVAILABILITY["checked_at"] = now
+    _OLLAMA_AVAILABILITY["available"] = available
+    return available
+
+
+def _ollama_chat(messages: List[Dict[str, Any]], timeout_sec: float, num_predict: Optional[int] = None) -> str:
+    options: Dict[str, Any] = {"temperature": 0.2, "top_p": 0.9}
+    if num_predict:
+        options["num_predict"] = num_predict
+    payload = {
+        "model": _get_local_llm_model(),
+        "messages": messages,
+        "stream": False,
+        "options": options,
+    }
+    resp = requests.post(f"{_get_ollama_base_url()}/api/chat", json=payload, timeout=timeout_sec)
+    resp.raise_for_status()
+    content = str((resp.json().get("message") or {}).get("content") or "").strip()
+    if not content:
+        raise RuntimeError("Local model returned an empty response")
+    return content
+
+
+def _gemma_narrative_report(
+    crop_img: Optional[Any],
+    image_path: str,
+    disease: str,
+    confidence: float,
+    patient_context: str,
+) -> Optional[str]:
+    """Generate a structured draft report with Gemma 4 E2B vision.
+
+    Used when the CheXagent analyzer is unavailable (the default on
+    non-CUDA edge devices). Returns None when the local model is disabled,
+    unreachable, or fails — callers keep their detector-only fallback.
+    """
+    if os.getenv("HSIL_DISABLE_GEMMA_ANALYZER", "0") == "1":
+        return None
+    if not _is_local_llm_available():
+        return None
+
+    import base64
+    import cv2
+
+    try:
+        if crop_img is not None:
+            ok, buf = cv2.imencode(".png", crop_img)
+            if not ok:
+                return None
+            image_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        else:
+            with open(image_path, "rb") as fp:
+                image_b64 = base64.b64encode(fp.read()).decode("ascii")
+
+        prompt = (
+            "You are a radiology assistant reviewing a chest X-ray region for a frontline nurse.\n"
+            f"Patient context: {patient_context or 'not provided'}\n"
+            f"CNN detector finding: {disease} (confidence {confidence:.0%})\n\n"
+            "Write a concise draft report using exactly these section headers:\n\n"
+            "KEY FINDINGS: what is visible in the image and whether it supports the detector finding.\n"
+            "DIFFERENTIAL DIAGNOSTICS: primary diagnosis plus 2-3 alternatives to consider.\n"
+            "FUTURE STEPS/PRECAUTIONS: 2-4 practical next actions for a rural clinic.\n\n"
+            "Be specific and clinical. Do not invent patient history that was not provided."
+        )
+        timeout_sec = _read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 120.0)
+        return _ollama_chat(
+            [{"role": "user", "content": prompt, "images": [image_b64]}],
+            timeout_sec=timeout_sec,
+            num_predict=400,
+        )
+    except Exception as ex:
+        _write_event("gemma_narrative_failed", {"error": str(ex)[:300]})
+        return None
+
+
+def _read_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> Dict[str, str]:
-    base_url = os.getenv("HSIL_OLLAMA_URL", "http://localhost:11434").rstrip("/")
-    preferred_model = _get_preferred_copilot_model()
-    model_name = _pick_available_ollama_model(preferred_model, base_url)
+    model_name = _get_local_llm_model()
 
     system_prompt = (
         "You are HSIL Clinical Copilot. Respond for clinicians reviewing a chest X-ray case. "
@@ -2777,25 +3013,13 @@ def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> 
         "Respond with: 1) direct answer, 2) short rationale, 3) suggested next actions."
     )
 
-    payload = {
-        "model": model_name,
-        "messages": [
+    content = _ollama_chat(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "stream": False,
-        "options": {
-            "temperature": 0.2,
-            "top_p": 0.9,
-        },
-    }
-
-    resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    content = str((data.get("message") or {}).get("content") or "").strip()
-    if not content:
-        raise RuntimeError("Ollama returned an empty response")
+        timeout_sec=60,
+    )
     return {"model": model_name, "response": content}
 
 
@@ -2903,19 +3127,33 @@ def chat(data: Dict[Any, Any], db: Session = Depends(get_db)):
         )
         return {"response": fallback, "activeModel": active_ai_model}
 
+ALLOWED_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".jfif", ".bmp", ".tif", ".tiff", ".dcm"}
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
 @app.post("/api/v1/upload")
 async def upload_image(file: UploadFile = File(...)):
-    # Save the file to .files directory
-    files_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".files")
-    os.makedirs(files_dir, exist_ok=True)
-    
-    file_ext = os.path.splitext(file.filename)[1] if file.filename else ".png"
+    file_ext = os.path.splitext(file.filename)[1].lower() if file.filename else ".png"
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_ext}")
+
     unique_filename = f"{uuid.uuid4().hex}{file_ext}"
     file_path = os.path.join(files_dir, unique_filename)
-    
+
+    size = 0
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                buffer.close()
+                os.remove(file_path)
+                raise HTTPException(status_code=413, detail="File exceeds 50MB limit")
+            buffer.write(chunk)
+
+    if size == 0:
+        os.remove(file_path)
+        raise HTTPException(status_code=400, detail="Empty file")
+
     return {"imagePath": f".files/{unique_filename}"}
 
 

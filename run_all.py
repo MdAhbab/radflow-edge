@@ -224,9 +224,15 @@ def start_backend(pipeline_mode: str = "experiment1"):
         backend_env = os.environ.copy()
         backend_env["HSIL_PIPELINE_MODE"] = pipeline_mode
 
+        # Hot reload is opt-in: the watchfiles reloader keeps a second watcher
+        # process alive and adds steady CPU/memory load on long-running devices.
+        uvicorn_args = [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+        if os.getenv("HSIL_DEV", "0") == "1":
+            uvicorn_args.append("--reload")
+
         # Start backend
         proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"],
+            uvicorn_args,
             cwd=backend_dir,
             env=backend_env,
             stdout=subprocess.PIPE,
