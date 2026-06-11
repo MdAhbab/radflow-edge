@@ -12,11 +12,21 @@ RadFlow-Edge runs entirely on-device — no cloud dependency, no data leaving th
 |-------|-------------|
 | **Detector** | TorchXRayVision DenseNet121 — scores 18 chest pathologies |
 | **Localizer** | GradCAM — heatmap + bounding box overlay |
-| **Narrative** | Gemma 4 E2B via Ollama — vision-capable, structured report |
-| **Copilot** | Gemma 4 E2B — contextual Q&A scoped to the open case |
+| **Radiology VLM** | Gemma vision on **Apple MLX** (`mlx-vlm`) — the chest-X-ray narrative |
+| **Gemma services** | Gemma 4 E2B via **Ollama** — copilot chat, voice intake, agents, OCR extraction |
 | **Foveal (Exp 2)** | OpenCV contrast crop — reduces VLM token load ~80% |
 
 All AI inference is async-queued (SQLite-backed job table). The frontend polls for results; the case creation endpoint returns immediately.
+
+### Two model runtimes, one at a time
+
+The chest-X-ray radiology VLM runs on **Apple MLX**; the Gemma 4 services (copilot,
+voice, agents, OCR) run on **Ollama**. On a memory-constrained edge box (8 GB) the
+two runtimes must never be resident together, so a global execution coordinator
+(`backend/model_executor.py`) serializes all model work and evicts whichever
+runtime is not currently needed before loading the other. If the MLX model is
+unavailable, the radiology narrative falls back to Ollama automatically. See
+[Memory governance](#memory-governance) below.
 
 ---
 
@@ -180,13 +190,43 @@ All have safe defaults — only set them if you need to change the defaults.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `HSIL_PIPELINE_MODE` | `experiment1` | Active AI pipeline (`experiment1`, `experiment2`, `both`, `none`) |
-| `HSIL_COPILOT_MODEL` | `gemma4:e2b` | Ollama model for copilot + vision narrative |
+| `HSIL_COPILOT_MODEL` | `gemma4:e2b` | Ollama model for the Gemma services (copilot, voice, agents, OCR) |
+| `HSIL_MLX_RADIOLOGY_MODEL` | `mlx-community/gemma-3-4b-it-4bit` | MLX-VLM model for the chest-X-ray narrative |
+| `HSIL_DISABLE_MLX_RADIOLOGY` | `0` | Set to `1` to force the Ollama narrative instead of MLX |
+| `HSIL_MLX_MEM_LIMIT_GB` | `5.0` | Hard cap on MLX memory (keeps it off swap) |
+| `HSIL_OLLAMA_NUM_CTX` | `4096` | Ollama context window (model default 131072 — big KV-cache saving) |
+| `HSIL_OLLAMA_KEEP_ALIVE` | `30s` | How long Ollama keeps Gemma resident when idle |
 | `HSIL_OLLAMA_URL` | `http://localhost:11434` | Ollama base URL |
 | `HSIL_GEMMA_TIMEOUT_SEC` | `120` | Per-request timeout for Gemma calls |
-| `HSIL_DISABLE_GEMMA_ANALYZER` | `0` | Set to `1` to skip Gemma narrative generation |
+| `HSIL_DISABLE_GEMMA_ANALYZER` | `0` | Set to `1` to skip the Ollama narrative fallback |
 | `HSIL_ENABLE_EXP1_ANALYZER` | `auto` | Set to `1` to force-enable CheXagent on non-CUDA |
 | `HSIL_DEV` | unset | Set to `1` to enable uvicorn `--reload` |
 | `VITE_API_HOST` | `http://localhost:8000` | Backend base URL for the frontend build |
+
+---
+
+## Memory governance
+
+The reference device is an 8 GB unified-memory Mac, so memory discipline is a
+first-class concern, not an afterthought:
+
+- **One model at a time.** A global execution slot (`backend/model_executor.py`)
+  serializes all model work — detector, GradCAM, MLX radiology VLM, and every
+  Ollama call — and tracks which language/vision runtime is resident.
+- **MLX and Ollama never co-resident.** Before MLX runs it evicts the Ollama
+  model; before an Ollama service runs it frees the MLX model (`mx.clear_cache()`).
+  The MLX side is also capped with `mx.set_memory_limit` (`HSIL_MLX_MEM_LIMIT_GB`).
+- **Capped Ollama context.** Every Ollama call sets `num_ctx=4096` instead of the
+  131072 default, the single biggest per-call KV-cache saving.
+- **Swap-aware backpressure.** The async job worker waits out high macOS swap
+  pressure (bounded) before starting another model, so a backlog can't drive the
+  device into a swap death-spiral.
+- **Server-side KV-cache quantization (recommended):** start the Ollama service
+  with `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q8_0` to roughly halve
+  its KV-cache memory (these are read by `ollama serve`, not by this app):
+  ```bash
+  OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
+  ```
 
 ---
 
@@ -214,13 +254,15 @@ All have safe defaults — only set them if you need to change the defaults.
 
 ## Hardware support
 
-| Hardware | Detector | GradCAM | CheXagent VLM | Gemma narrative |
-|----------|----------|---------|----------------|-----------------|
-| Apple Silicon | CPU/MPS | CPU/MPS | Disabled by default | Ollama (CPU/MPS) |
-| NVIDIA GPU | CUDA | CUDA | 4-bit quantized | Ollama (GPU) |
-| CPU only | CPU | CPU | Disabled | Ollama (CPU) |
+| Hardware | Detector | GradCAM | Radiology narrative |
+|----------|----------|---------|---------------------|
+| Apple Silicon | MPS/CPU | MPS/CPU | **MLX-VLM** (Metal); Ollama fallback |
+| NVIDIA GPU | CUDA | CUDA | CheXagent (4-bit) or Ollama |
+| CPU only | CPU | CPU | Ollama (CPU) |
 
-On Apple Silicon and CPU-only machines Gemma 4 E2B generates the narrative report that would otherwise come from CheXagent.
+On Apple Silicon the radiology narrative runs on MLX (Metal GPU, unified memory);
+the Gemma 4 services (copilot, voice, agents, OCR) run on Ollama. The two are
+never resident at the same time — see [Memory governance](#memory-governance).
 
 ---
 
@@ -228,6 +270,19 @@ On Apple Silicon and CPU-only machines Gemma 4 E2B generates the narrative repor
 
 **Copilot returns empty responses**
 Gemma 4 E2B is a thinking model. The backend already sets `think: false` in all Ollama calls to prevent the hidden reasoning chain from consuming the token budget. If you're calling Ollama directly outside this app, add `"think": false` to your payload.
+
+**Radiology narrative is slow on the first case / want to disable MLX**
+The MLX radiology model (`HSIL_MLX_RADIOLOGY_MODEL`, ~2.5 GB) downloads on first
+use and loads on the first analysis (~30 s), then stays warm. To skip MLX
+entirely and use the Ollama narrative, set `HSIL_DISABLE_MLX_RADIOLOGY=1`. If MLX
+fails to load for any reason the app falls back to Ollama automatically — no
+configuration needed.
+
+**Device swapping under load (8 GB)**
+Start Ollama with a quantized KV cache (`OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve`), keep `HSIL_OLLAMA_NUM_CTX=4096`, and
+lower `HSIL_MLX_MEM_LIMIT_GB` if needed. Close other large apps; the radiology VLM
+needs ~3.2 GB of headroom. See [Memory governance](#memory-governance).
 
 **"Model not found" on startup**
 Run the download script:
