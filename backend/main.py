@@ -93,10 +93,16 @@ INFERENCE_QUEUE: "queue.Queue[str]" = queue.Queue()
 INFERENCE_WORKER_STARTED = False
 INFERENCE_WORKER_LOCK = threading.Lock()
 
-# Model inference is serialized: concurrent torch runs on shared-memory edge
-# hardware multiply peak RSS and push macOS into swap. RLock because consensus
-# re-enters the experiment runners within one logical analysis.
-PIPELINE_LOCK = threading.RLock()
+# Model inference is serialized through a single global execution slot:
+# only one model (torch pipeline, local LLM, OCR, risk scorer) may run at
+# any moment on shared-memory edge hardware. See model_executor.py.
+from model_executor import (
+    model_slot,
+    neutralize_torch,
+    unload_local_llm,
+    current_model_slot,
+    recent_slot_history,
+)
 
 # Configurable triage policy rules (can be replaced per-hospital).
 POLICY_RULES: Dict[str, Any] = {
@@ -956,8 +962,11 @@ def _get_exp1_analyzer_optional():
 
 
 def _run_experiment1(image_path: str, patient_context: str = "") -> Dict[str, Any]:
-    with PIPELINE_LOCK:
-        return _run_experiment1_locked(image_path, patient_context)
+    with model_slot("experiment1:detector+gradcam"):
+        try:
+            return _run_experiment1_locked(image_path, patient_context)
+        finally:
+            neutralize_torch()
 
 
 def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[str, Any]:
@@ -1044,13 +1053,18 @@ def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[
 
     if analyzer is not None and crops:
         try:
+            # The VLM needs the whole memory budget: release torch caches
+            # from the detector stage and evict the local LLM before it runs.
+            neutralize_torch()
+            unload_local_llm(_get_ollama_base_url(), _get_local_llm_model())
             analysis_start = time.perf_counter()
-            analysis_text = analyzer.analyze(
-                crop_img=crops[0]["image"],
-                disease_hint=disease,
-                patient_context=patient_context,
-                rag_context="",
-            )
+            with model_slot("chexagent:vlm"):
+                analysis_text = analyzer.analyze(
+                    crop_img=crops[0]["image"],
+                    disease_hint=disease,
+                    patient_context=patient_context,
+                    rag_context="",
+                )
             analysis_ms = (time.perf_counter() - analysis_start) * 1000.0
             
             ddx = _extract_report_section(analysis_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
@@ -1067,6 +1081,8 @@ def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[
             analyzer_state = f"error: {ex}"
 
     if finding_items[0].get("report") is None:
+        # Detector stage is done — hand the memory budget to the local LLM.
+        neutralize_torch()
         narrative_start = time.perf_counter()
         gemma_text = _gemma_narrative_report(
             crops[0]["image"] if crops else None,
@@ -1152,8 +1168,11 @@ def _load_module_from_file(module_name: str, file_path: str):
 
 
 def _run_experiment2(image_path: str, patient_context: str = "") -> Dict[str, Any]:
-    with PIPELINE_LOCK:
-        return _run_experiment2_locked(image_path, patient_context)
+    with model_slot("experiment2:foveal+detector"):
+        try:
+            return _run_experiment2_locked(image_path, patient_context)
+        finally:
+            neutralize_torch()
 
 
 def _run_experiment2_locked(image_path: str, patient_context: str = "") -> Dict[str, Any]:
@@ -1424,11 +1443,42 @@ def _enrich_analysis(
     analysis.setdefault("metadata", {})["uncertainty"] = _estimate_uncertainty(analysis, calibration)
 
     _apply_policy_to_analysis(analysis, case_obj, patient_context)
+    _apply_risk_assessment(analysis, case_obj, raw_conf)
 
     if force_consensus or _needs_dual_consensus(analysis):
         analysis = _merge_consensus(image_path, patient_context, analysis)
 
     return analysis
+
+
+def _apply_risk_assessment(analysis: Dict[str, Any], case_obj: Optional[Case], ai_confidence: float) -> None:
+    """Attach qSOFA + model deterioration risk to the analysis metadata."""
+    if os.getenv("HSIL_DISABLE_RISK_MODEL", "0") == "1":
+        return
+    try:
+        from risk_engine import assess_risk
+
+        vitals = {}
+        if case_obj is not None:
+            vitals = {
+                "age": case_obj.age,
+                "vital_temp": case_obj.vital_temp,
+                "vital_hr": case_obj.vital_hr,
+                "vital_resp": case_obj.vital_resp,
+                "vital_spo2": case_obj.vital_spo2,
+                "vital_bp": case_obj.vital_bp,
+            }
+        result = assess_risk(vitals, ai_confidence)
+        analysis.setdefault("metadata", {})["risk"] = {
+            "qsofaScore": result.qsofa_score,
+            "qsofaFlags": result.qsofa_flags,
+            "modelProbability": result.model_probability,
+            "riskBand": result.risk_band,
+            "rationale": result.rationale,
+            "shapContributions": result.shap_contributions,
+        }
+    except Exception as ex:
+        _write_event("risk_assessment_failed", {"error": str(ex)[:200]})
 
 
 def _ensure_escalation(case_obj: Case, analysis: Dict[str, Any], db: Session) -> None:
@@ -2154,6 +2204,8 @@ def get_system_status(db: Session = Depends(get_db)):
             "exp1_analyzer": _exp1_analyzer is not None,
             "exp2_preprocessor": _exp2_preprocessor is not None,
         },
+        "model_slot": current_model_slot(),
+        "model_slot_history": recent_slot_history()[-10:],
         "queue_stage_depth": async_job_counts,
         "retry_count": retry_count,
         "failed_jobs": failed_jobs,
@@ -2928,14 +2980,98 @@ def _ollama_chat(messages: List[Dict[str, Any]], timeout_sec: float, num_predict
         # Gemma 4 is a thinking model; without this its hidden reasoning
         # consumes the token budget and the visible answer comes back empty.
         "think": False,
+        "keep_alive": os.getenv("HSIL_OLLAMA_KEEP_ALIVE", "5m"),
         "options": options,
     }
-    resp = requests.post(f"{_get_ollama_base_url()}/api/chat", json=payload, timeout=timeout_sec)
+    with model_slot(f"local_llm:{payload['model']}"):
+        resp = requests.post(f"{_get_ollama_base_url()}/api/chat", json=payload, timeout=timeout_sec)
     resp.raise_for_status()
     content = str((resp.json().get("message") or {}).get("content") or "").strip()
     if not content:
         raise RuntimeError("Local model returned an empty response")
     return content
+
+
+def _ollama_audio_chat(
+    prompt: str,
+    audio_b64: str,
+    audio_format: str = "wav",
+    timeout_sec: float = 180.0,
+    max_tokens: int = 1500,
+) -> str:
+    """Send an audio clip to the local multimodal LLM.
+
+    Audio input only works through Ollama's OpenAI-compatible endpoint
+    (``input_audio`` content parts); the native /api/chat audio field is
+    silently ignored. The /v1 endpoint cannot disable thinking, so the
+    token budget must absorb the hidden reasoning before the answer.
+    """
+    payload = {
+        "model": _get_local_llm_model(),
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "input_audio", "input_audio": {"data": audio_b64, "format": audio_format}},
+                ],
+            }
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.1,
+    }
+    with model_slot(f"local_llm:{payload['model']}:audio"):
+        resp = requests.post(
+            f"{_get_ollama_base_url()}/v1/chat/completions", json=payload, timeout=timeout_sec
+        )
+    resp.raise_for_status()
+    choices = resp.json().get("choices") or [{}]
+    content = str((choices[0].get("message") or {}).get("content") or "").strip()
+    if not content:
+        raise RuntimeError("Local model returned an empty response for audio input")
+    return content
+
+
+def _hyde_expand(query: str) -> str:
+    """HyDE: ask the local model for a one-line hypothetical guideline
+    statement to widen dense retrieval recall. Best-effort; empty on
+    failure so retrieval falls back to the raw query."""
+    if os.getenv("HSIL_DISABLE_HYDE", "0") == "1" or not _is_local_llm_available():
+        return ""
+    try:
+        return _ollama_chat(
+            [{
+                "role": "user",
+                "content": (
+                    "Write one sentence of clinical guideline text that would answer this. "
+                    f"No preamble.\nQuery: {query}"
+                ),
+            }],
+            timeout_sec=30.0,
+            num_predict=80,
+        )
+    except Exception:
+        return ""
+
+
+def _retrieve_guideline_context(disease: str, patient_context: str) -> tuple:
+    """Hybrid-retrieve cited guideline passages for a finding.
+
+    Returns (context_block, [citation strings]). Empty on any failure so
+    the narrative still generates without grounding rather than erroring.
+    """
+    if os.getenv("HSIL_DISABLE_RAG", "0") == "1":
+        return "", []
+    try:
+        from rag_engine import get_rag_engine
+
+        rag = get_rag_engine()
+        query = f"{disease}. {patient_context}".strip()
+        passages = rag.retrieve(query, top_k=3, hyde_fn=_hyde_expand)
+        return rag.context_block(passages), [p.citation() for p in passages]
+    except Exception as ex:
+        _write_event("rag_retrieval_failed", {"error": str(ex)[:300]})
+        return "", []
 
 
 def _gemma_narrative_report(
@@ -2945,11 +3081,14 @@ def _gemma_narrative_report(
     confidence: float,
     patient_context: str,
 ) -> Optional[str]:
-    """Generate a structured draft report with Gemma 4 E2B vision.
+    """Generate a structured, guideline-cited draft report with Gemma 4
+    E2B vision.
 
     Used when the CheXagent analyzer is unavailable (the default on
-    non-CUDA edge devices). Returns None when the local model is disabled,
-    unreachable, or fails — callers keep their detector-only fallback.
+    non-CUDA edge devices). Retrieves WHO/NTP guideline passages and asks
+    the model to ground its answer in them with [SOURCE-ID] citations.
+    Returns None when the local model is disabled, unreachable, or fails —
+    callers keep their detector-only fallback.
     """
     if os.getenv("HSIL_DISABLE_GEMMA_ANALYZER", "0") == "1":
         return None
@@ -2969,22 +3108,34 @@ def _gemma_narrative_report(
             with open(image_path, "rb") as fp:
                 image_b64 = base64.b64encode(fp.read()).decode("ascii")
 
+        guideline_block, citations = _retrieve_guideline_context(disease, patient_context)
+        guideline_section = (
+            f"\nRELEVANT CLINICAL GUIDELINES (cite these by [SOURCE-ID]):\n{guideline_block}\n"
+            if guideline_block
+            else ""
+        )
+
         prompt = (
             "You are a radiology assistant reviewing a chest X-ray region for a frontline nurse.\n"
             f"Patient context: {patient_context or 'not provided'}\n"
-            f"CNN detector finding: {disease} (confidence {confidence:.0%})\n\n"
+            f"CNN detector finding: {disease} (confidence {confidence:.0%})\n"
+            f"{guideline_section}\n"
             "Write a concise draft report using exactly these section headers:\n\n"
             "KEY FINDINGS: what is visible in the image and whether it supports the detector finding.\n"
             "DIFFERENTIAL DIAGNOSTICS: primary diagnosis plus 2-3 alternatives to consider.\n"
             "FUTURE STEPS/PRECAUTIONS: 2-4 practical next actions for a rural clinic.\n\n"
+            "When you use a guideline above, cite it inline as [SOURCE-ID]. "
             "Be specific and clinical. Do not invent patient history that was not provided."
         )
         timeout_sec = _read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 120.0)
-        return _ollama_chat(
+        report = _ollama_chat(
             [{"role": "user", "content": prompt, "images": [image_b64]}],
             timeout_sec=timeout_sec,
-            num_predict=400,
+            num_predict=500,
         )
+        if report and citations:
+            report = report.rstrip() + "\n\nGUIDELINE SOURCES: " + "; ".join(citations)
+        return report
     except Exception as ex:
         _write_event("gemma_narrative_failed", {"error": str(ex)[:300]})
         return None
@@ -3004,13 +3155,29 @@ def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> 
         "You are RadFlow Copilot. Respond for clinicians reviewing a chest X-ray case. "
         "Use concise, clinically appropriate language with practical suggestions. "
         "Prefer percentages for confidence when present. "
-        "Base your answer strictly on supplied case context. "
+        "Base your answer strictly on supplied case context and cited guidelines. "
+        "When you use a guideline, cite it inline as [SOURCE-ID]. "
         "If data is missing, explicitly say what is missing and what to verify next."
+    )
+
+    # Ground the answer in retrieved guidelines for the case's top finding.
+    top_finding = ""
+    findings = context_payload.get("findings") if isinstance(context_payload, dict) else None
+    if isinstance(findings, list) and findings:
+        top_finding = str(findings[0].get("disease") or findings[0].get("label") or "")
+    guideline_block, citations = _retrieve_guideline_context(
+        top_finding or message, str(context_payload.get("complaint", ""))
+    )
+    guideline_section = (
+        f"RELEVANT CLINICAL GUIDELINES (cite by [SOURCE-ID]):\n{guideline_block}\n\n"
+        if guideline_block
+        else ""
     )
 
     user_prompt = (
         "CASE CONTEXT (JSON):\n"
         f"{json.dumps(context_payload, ensure_ascii=True)}\n\n"
+        f"{guideline_section}"
         "CLINICIAN QUESTION:\n"
         f"{message}\n\n"
         "Respond with: 1) direct answer, 2) short rationale, 3) suggested next actions."
@@ -3023,6 +3190,8 @@ def _call_ollama_case_copilot(message: str, context_payload: Dict[str, Any]) -> 
         ],
         timeout_sec=60,
     )
+    if citations:
+        content = content.rstrip() + "\n\nSources: " + "; ".join(citations)
     return {"model": model_name, "response": content}
 
 
@@ -3158,6 +3327,444 @@ async def upload_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Empty file")
 
     return {"imagePath": f".files/{unique_filename}"}
+
+
+ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3"}
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+@app.post("/api/v1/intake/voice")
+async def voice_intake(file: UploadFile = File(...)):
+    """Transcribe a spoken intake (Bangla/English/mixed) and extract form
+    fields with the local multimodal LLM. The clinician reviews the
+    auto-filled form before anything is saved."""
+    import base64
+
+    from voice_intake import INTAKE_PROMPT, parse_intake_response
+
+    file_ext = os.path.splitext(file.filename or "")[1].lower() or ".wav"
+    if file_ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported audio type: {file_ext}")
+
+    audio_bytes = await file.read()
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio exceeds 25MB limit")
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    if not _is_local_llm_available():
+        raise HTTPException(status_code=503, detail="Local model is not available; type the intake manually")
+
+    try:
+        raw = _ollama_audio_chat(
+            INTAKE_PROMPT,
+            base64.b64encode(audio_bytes).decode("ascii"),
+            audio_format=file_ext.lstrip("."),
+            timeout_sec=_read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 180.0),
+        )
+        result = parse_intake_response(raw)
+    except ValueError as ex:
+        _write_event("voice_intake_parse_failed", {"error": str(ex)[:300]})
+        raise HTTPException(status_code=502, detail="Could not understand the recording; please retry or type manually")
+    except requests.RequestException as ex:
+        _write_event("voice_intake_llm_failed", {"error": str(ex)[:300]})
+        raise HTTPException(status_code=503, detail="Local model did not respond; please retry")
+
+    result["model"] = _get_local_llm_model()
+    _write_event(
+        "voice_intake_completed",
+        {"transcript_chars": len(result["transcript"]), "missing": result["missing_fields"]},
+    )
+    return result
+
+
+@app.post("/api/v1/intake/document")
+async def document_intake(
+    file: UploadFile = File(...),
+    patient_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """OCR a prescription/report/lab-slip photo, extract structured fields
+    with the local model, and (optionally) merge into a patient record."""
+    import base64
+
+    from doc_ingest import EXTRACT_PROMPT, merge_into_record, ocr_image, parse_extraction
+
+    file_ext = os.path.splitext(file.filename or "")[1].lower() or ".png"
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_ext}")
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 50MB limit")
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    unique_filename = f"doc_{uuid.uuid4().hex}{file_ext}"
+    saved_path = os.path.join(files_dir, unique_filename)
+    with open(saved_path, "wb") as fp:
+        fp.write(raw_bytes)
+
+    ocr_text = ocr_image(saved_path, os.getenv("HSIL_OCR_LANGS", "ben+eng"))
+    if not ocr_text:
+        raise HTTPException(status_code=422, detail="Could not read any text from the document")
+
+    extracted: Dict[str, Any] = {}
+    if _is_local_llm_available():
+        try:
+            image_b64 = base64.b64encode(raw_bytes).decode("ascii")
+            raw = _ollama_chat(
+                [{"role": "user", "content": EXTRACT_PROMPT + ocr_text[:4000], "images": [image_b64]}],
+                timeout_sec=_read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 120.0),
+                num_predict=500,
+            )
+            extracted = parse_extraction(raw)
+        except Exception as ex:
+            _write_event("document_extract_failed", {"error": str(ex)[:200]})
+
+    merged_updates: Dict[str, Any] = {}
+    if patient_id and extracted:
+        case_obj = (
+            db.query(Case)
+            .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
+            .order_by(Case.id.desc())
+            .first()
+        )
+        if case_obj is not None:
+            existing = {"clinical_notes": case_obj.clinical_notes, "risk_factors": case_obj.risk_factors}
+            merged_updates = merge_into_record(existing, extracted)
+            for field_name, value in merged_updates.items():
+                setattr(case_obj, field_name, value)
+            db.commit()
+
+    _write_event("document_intake_completed", {"chars": len(ocr_text), "patient_id": patient_id})
+    return {
+        "imagePath": f".files/{unique_filename}",
+        "ocrText": ocr_text,
+        "fields": extracted,
+        "appliedUpdates": merged_updates,
+        "model": _get_local_llm_model() if extracted else None,
+    }
+
+
+def _agent_llm(prompt: str) -> str:
+    """Single-prompt local-model call used by the lightweight agents."""
+    return _ollama_chat([{"role": "user", "content": prompt}], timeout_sec=90, num_predict=600)
+
+
+def _detect_lan_ip() -> str:
+    """Best-effort LAN IP of this device (the address phones on the same
+    WiFi should hit). Falls back to localhost."""
+    import socket
+
+    override = os.getenv("HSIL_LAN_HOST")
+    if override:
+        return override
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # no packets sent; just resolves the route
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+@app.get("/api/v1/lan/info")
+def lan_info():
+    """LAN intake URL + QR code so nearby phones can upload images to this
+    device over WiFi without internet."""
+    import base64
+    import io
+
+    port = int(os.getenv("HSIL_PORT", "8000"))
+    url = f"http://{_detect_lan_ip()}:{port}/lan"
+    qr_b64 = ""
+    try:
+        import qrcode
+        from qrcode.image.pil import PilImage
+
+        img = qrcode.make(url, image_factory=PilImage)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        qr_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        pass
+    return {"url": url, "qrDataUrl": qr_b64}
+
+
+@app.get("/lan", response_class=None)
+def lan_portal():
+    """Self-contained mobile upload page served to LAN devices. No build
+    step, no internet — a single HTML document with inline JS."""
+    from fastapi.responses import HTMLResponse
+
+    html = """<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RadFlow-Edge — Upload</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0;padding:20px}
+ .card{max-width:520px;margin:0 auto;background:#1e293b;border-radius:16px;padding:24px}
+ h1{font-size:20px;margin:0 0 4px}p{color:#94a3b8;font-size:14px;margin:4px 0 20px}
+ label{display:block;font-size:13px;margin:14px 0 6px;color:#cbd5e1}
+ input,select{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:16px}
+ button{width:100%;margin-top:20px;padding:14px;border:0;border-radius:10px;background:#2563eb;color:#fff;font-size:16px;font-weight:600}
+ button:disabled{opacity:.6}
+ .doc{margin-top:10px}.ok{color:#34d399}.err{color:#f87171}
+ #status{margin-top:16px;font-size:14px;min-height:20px}
+</style></head><body><div class="card">
+ <h1>RadFlow-Edge Upload</h1>
+ <p>Send an X-ray or document to the clinic device on this WiFi. No internet needed.</p>
+ <label>Type</label>
+ <select id="kind"><option value="xray">Chest X-ray (new case)</option>
+  <option value="document">Prescription / report (document)</option></select>
+ <label>Patient name (X-ray)</label><input id="name" placeholder="Full name">
+ <label>Existing patient ID (document, optional)</label><input id="pid" placeholder="PT-...">
+ <label>Image</label><input id="file" type="file" accept="image/*" capture="environment">
+ <button id="go">Upload</button>
+ <div id="status"></div>
+</div><script>
+const $=id=>document.getElementById(id);
+$('go').onclick=async()=>{
+ const f=$('file').files[0]; const st=$('status');
+ if(!f){st.className='err';st.textContent='Choose an image first.';return;}
+ $('go').disabled=true;st.className='';st.textContent='Uploading…';
+ const fd=new FormData();fd.append('file',f);
+ try{
+  if($('kind').value==='xray'){
+   const up=await fetch('/api/v1/upload',{method:'POST',body:fd});
+   const u=await up.json();
+   const c=await fetch('/api/v1/cases',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({name:$('name').value||'LAN Upload',age:0,sex:'O',complaint:'Submitted via LAN portal',imagePath:u.imagePath})});
+   if(!c.ok)throw new Error('case create failed');
+   st.className='ok';st.textContent='X-ray received. The clinician will see it in the worklist.';
+  }else{
+   const pid=$('pid').value.trim();
+   const url='/api/v1/intake/document'+(pid?('?patient_id='+encodeURIComponent(pid)):'');
+   const r=await fetch(url,{method:'POST',body:fd});
+   if(!r.ok)throw new Error('document upload failed');
+   st.className='ok';st.textContent='Document received and read. Fields were extracted for the clinician.';
+  }
+  $('file').value='';
+ }catch(e){st.className='err';st.textContent='Upload failed: '+e.message;}
+ $('go').disabled=false;
+};
+</script></body></html>"""
+    return HTMLResponse(content=html)
+
+
+@app.post("/api/v1/maintenance/run")
+def run_maintenance(payload: Optional[Dict[str, Any]] = None):
+    """Trigger the Prefect nightly-maintenance pass on demand (backup, RAG
+    refresh, continual learning). Long-running; returns a summary."""
+    import sys as _sys
+
+    flows_dir = os.path.join(BASE_DIR, "flows")
+    if flows_dir not in _sys.path:
+        _sys.path.insert(0, flows_dir)
+    try:
+        from prefect_flows import run_all_once
+
+        run_llm = bool((payload or {}).get("runLlmQlora", False))
+        result = run_all_once(run_llm=run_llm)
+        return {"status": "completed", "result": result}
+    except Exception as ex:
+        cid = uuid.uuid4().hex[:12]
+        print(f"CRITICAL ERROR [{cid}] POST /api/v1/maintenance/run: {ex}")
+        raise HTTPException(status_code=500, detail={"message": "Maintenance run failed", "errorId": cid})
+
+
+@app.get("/api/v1/analytics/summary")
+def analytics_summary(db: Session = Depends(get_db)):
+    """Aggregated analytics for the Insights dashboard: triage distribution,
+    finding frequency, confidence trend, and a representative risk SHAP
+    breakdown."""
+    cases = db.query(Case).filter(Case.is_deleted == 0).all()
+
+    triage_counts: Dict[str, int] = {"red": 0, "orange": 0, "yellow": 0, "green": 0}
+    for c in cases:
+        if c.triage_color in triage_counts:
+            triage_counts[c.triage_color] += 1
+
+    finding_counts: Dict[str, int] = defaultdict(int)
+    for f in db.query(Finding).filter(Finding.is_deleted == 0).all():
+        if f.disease:
+            finding_counts[f.disease] += 1
+    top_findings = sorted(finding_counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+
+    # Confidence trend over the most recent analysed cases (chronological).
+    recent = [c for c in cases if c.confidence is not None][-20:]
+    confidence_trend = [
+        {"patientId": c.patient_id, "confidence": round(float(c.confidence or 0), 3)}
+        for c in recent
+    ]
+
+    # Representative SHAP breakdown from the risk model on a worst-case vitals
+    # profile, so the dashboard can always render the explainability chart.
+    shap_example: Dict[str, float] = {}
+    try:
+        from risk_engine import get_risk_model
+
+        _, shap_example = get_risk_model().predict(
+            {"age": 70, "vital_temp": 102, "vital_hr": 120, "vital_resp": 26, "vital_spo2": 90, "vital_bp": "98/62"},
+            ai_confidence=0.7,
+        )
+    except Exception:
+        shap_example = {}
+
+    return {
+        "triageDistribution": [{"name": k, "value": v} for k, v in triage_counts.items()],
+        "topFindings": [{"name": k, "count": v} for k, v in top_findings],
+        "confidenceTrend": confidence_trend,
+        "totalCases": len(cases),
+        "shapExample": [{"feature": k, "contribution": v} for k, v in sorted(shap_example.items(), key=lambda kv: abs(kv[1]), reverse=True)],
+    }
+
+
+@app.get("/api/v1/agents")
+def list_agents():
+    """List the available agentic workflows and what each does."""
+    from agents import AGENT_REGISTRY
+
+    return {"agents": [{"id": k, "description": v} for k, v in AGENT_REGISTRY.items()]}
+
+
+@app.post("/api/v1/agents/briefing")
+def agent_briefing(db: Session = Depends(get_db)):
+    """Morning Briefing agent: summarise the worklist + propose review order."""
+    if not _is_local_llm_available():
+        raise HTTPException(status_code=503, detail="Local model is not available")
+    from agents import run_morning_briefing
+
+    cases = [c.model_dump() for c in get_cases(db=db)]
+    briefing = run_morning_briefing(cases, _agent_llm)
+    return {"briefing": briefing, "caseCount": len(cases), "model": _get_local_llm_model()}
+
+
+@app.post("/api/v1/agents/escalation-draft/{patient_id}")
+def agent_escalation_draft(patient_id: str, db: Session = Depends(get_db)):
+    """Escalation Drafter agent: draft a specialist referral note."""
+    if not _is_local_llm_available():
+        raise HTTPException(status_code=503, detail="Local model is not available")
+    from agents import run_escalation_drafter
+
+    context = _build_case_copilot_context(db, patient_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+    draft = run_escalation_drafter(context, _agent_llm)
+    return {"draft": draft, "patientId": patient_id, "model": _get_local_llm_model()}
+
+
+@app.post("/api/v1/agents/triage-reason/{patient_id}")
+def agent_triage_reason(patient_id: str, db: Session = Depends(get_db)):
+    """Triage Reasoner agent: LangGraph retrieve -> risk -> reason -> decide."""
+    if not _is_local_llm_available():
+        raise HTTPException(status_code=503, detail="Local model is not available")
+    from agents import run_triage_reasoner
+    from risk_engine import assess_risk
+
+    case_obj = (
+        db.query(Case)
+        .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
+        .order_by(Case.id.desc())
+        .first()
+    )
+    if case_obj is None:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    findings = (
+        db.query(Finding)
+        .filter(Finding.case_id == patient_id, Finding.is_deleted == 0)
+        .all()
+    )
+    disease = findings[0].disease if findings else "No significant finding"
+    vitals = {
+        "age": case_obj.age,
+        "vital_temp": case_obj.vital_temp,
+        "vital_hr": case_obj.vital_hr,
+        "vital_resp": case_obj.vital_resp,
+        "vital_spo2": case_obj.vital_spo2,
+        "vital_bp": case_obj.vital_bp,
+    }
+    result = run_triage_reasoner(
+        disease=disease,
+        confidence=float(case_obj.confidence or 0.0),
+        patient_context=case_obj.complaint or "",
+        vitals=vitals,
+        retrieve_fn=_retrieve_guideline_context,
+        llm_fn=_agent_llm,
+        risk_fn=assess_risk,
+    )
+    result["patientId"] = patient_id
+    result["model"] = _get_local_llm_model()
+    return result
+
+
+@app.post("/api/v1/derma/analyze")
+async def derma_analyze(file: UploadFile = File(...)):
+    """Dermatology triage: classify a skin-lesion photo with EfficientNet-B3.
+    Runs under the single-model execution slot."""
+    file_ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_ext}")
+
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 50MB limit")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    unique_filename = f"derma_{uuid.uuid4().hex}{file_ext}"
+    saved_path = os.path.join(files_dir, unique_filename)
+    with open(saved_path, "wb") as fp:
+        fp.write(raw)
+
+    try:
+        from derma_engine import get_derma_classifier
+
+        with model_slot("derma:efficientnet_b3"):
+            result = get_derma_classifier().classify(saved_path)
+        neutralize_torch()
+    except Exception as ex:
+        cid = uuid.uuid4().hex[:12]
+        print(f"CRITICAL ERROR [{cid}] POST /api/v1/derma/analyze: {ex}")
+        _write_event("derma_failed", {"errorId": cid, "error": str(ex)[:300]})
+        raise HTTPException(status_code=500, detail={"message": "Dermatology analysis failed", "errorId": cid})
+
+    return {
+        "imagePath": f".files/{unique_filename}",
+        "label": result.label,
+        "confidence": result.confidence,
+        "triageBand": result.triage_band,
+        "advice": result.advice,
+        "differential": result.differential,
+        "fineTuned": result.fine_tuned,
+    }
+
+
+@app.post("/api/v1/risk/score")
+def risk_score(payload: Dict[str, Any]):
+    """Score deterioration risk for a set of vitals (qSOFA + model + SHAP)."""
+    from risk_engine import assess_risk
+
+    vitals = {
+        "age": payload.get("age"),
+        "vital_temp": payload.get("vitalTemp"),
+        "vital_hr": payload.get("vitalHr"),
+        "vital_resp": payload.get("vitalResp"),
+        "vital_spo2": payload.get("vitalSpo2"),
+        "vital_bp": payload.get("vitalBp"),
+        "altered_mentation": payload.get("alteredMentation", False),
+    }
+    result = assess_risk(vitals, float(payload.get("aiConfidence", 0.0) or 0.0))
+    return {
+        "qsofaScore": result.qsofa_score,
+        "qsofaFlags": result.qsofa_flags,
+        "modelProbability": result.model_probability,
+        "riskBand": result.risk_band,
+        "rationale": result.rationale,
+        "shapContributions": result.shap_contributions,
+    }
 
 
 if __name__ == "__main__":
