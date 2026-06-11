@@ -179,14 +179,16 @@ export function Worklist() {
     return () => clearSlots();
   }, [setSlots, clearSlots, loading]);
 
-  const fetchData = async () => {
+  const fetchData = async (): Promise<boolean> => {
     setError(null);
     try {
       const [casesData, statsData] = await Promise.all([api.getCases(), api.getCaseStats()]);
       setCases(casesData);
       setStats(statsData);
+      return casesData.some((c) => c.aiStatus === "analyzing");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load patient queue");
+      return false;
     } finally {
       setLoading(false);
     }
@@ -194,13 +196,24 @@ export function Worklist() {
 
   useEffect(() => {
     let mounted = true;
-    const run = async () => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    // Poll fast (10s) while any case is analyzing so results land promptly,
+    // and slow (30s) when the queue is idle. Skip while the tab is hidden.
+    const schedule = (analyzing: boolean) => {
       if (!mounted) return;
-      await fetchData();
+      timer = setTimeout(async () => {
+        if (document.hidden) {
+          schedule(analyzing);
+          return;
+        }
+        const stillAnalyzing = await fetchData();
+        schedule(stillAnalyzing);
+      }, analyzing ? 10_000 : 30_000);
     };
-    run();
-    const id = setInterval(run, 10_000);
-    return () => { mounted = false; clearInterval(id); };
+
+    fetchData().then((analyzing) => schedule(analyzing));
+    return () => { mounted = false; if (timer) clearTimeout(timer); };
   }, []);
 
   /* ── filter ── */

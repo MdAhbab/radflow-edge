@@ -159,18 +159,26 @@ export function CaseReview() {
   useEffect(() => {
     if (!patientId || loading) return;
     let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    // Poll findings and AI-owned case fields together: analysis completes
-    // asynchronously server-side, so confidence/triage/report must refresh
-    // without clobbering fields the clinician is editing locally.
+    // Analysis is async server-side, so we poll while it runs. Once the case
+    // reaches a terminal state we back off from 10s to 60s instead of polling
+    // forever (the case can still flip back to "analyzing" on a consensus
+    // re-run, which the slow poll catches and speeds back up). Fetches are
+    // skipped while the tab is hidden to avoid background network/CPU.
+    const TERMINAL = new Set(["complete", "escalated"]);
+    const delayFor = (status?: string) => (status && TERMINAL.has(status) ? 60_000 : 10_000);
+
     const refreshFindings = async () => {
       setFindingsLoading(true);
+      let status: string | undefined;
       try {
         const [data, serverCase] = await Promise.all([
           api.getFindings(patientId),
           api.getCase(patientId),
         ]);
         if (!mounted) return;
+        status = serverCase.aiStatus;
         const sorted = [...data].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
         setFindings(sorted);
         setCaseData((prev) => {
@@ -187,13 +195,24 @@ export function CaseReview() {
       } finally {
         if (mounted) setFindingsLoading(false);
       }
+      schedule(status);
+    };
+
+    const schedule = (status?: string) => {
+      if (!mounted) return;
+      timer = setTimeout(() => {
+        if (document.hidden) {
+          schedule(status); // tab hidden: re-arm without hitting the network
+          return;
+        }
+        refreshFindings();
+      }, delayFor(status));
     };
 
     refreshFindings();
-    const timer = setInterval(refreshFindings, 10000);
     return () => {
       mounted = false;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [patientId, loading]);
 

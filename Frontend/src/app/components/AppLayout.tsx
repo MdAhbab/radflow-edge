@@ -108,6 +108,9 @@ export function AppLayout() {
   useEffect(() => {
     let mounted = true;
     const fetch = async () => {
+      // Skip the badge refresh while the tab is hidden — no point spending
+      // network/CPU on nav counts nobody is looking at.
+      if (document.hidden) return;
       try {
         const [cases, escStats] = await Promise.all([api.getCases(), api.getEscalationStats()]);
         if (!mounted) return;
