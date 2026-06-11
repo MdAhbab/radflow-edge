@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "radflow-clinical-rag": {
+      "command": "python",
+      "args": ["mcp_servers/clinical_rag_mcp.py"],
+      "transport": "stdio",
+      "description": "Read-only clinical guideline RAG (search_guidelines, get_guideline_passage, list_corpus_sources). Dev/eval only.",
+      "reuse": ["Claude Desktop", "Cursor", "CLI test agents"]
+    },
+    "radflow-intake-scribe": {
+      "command": "python",
+      "args": ["mcp_servers/intake_scribe_mcp.py"],
+      "transport": "stdio",
+      "description": "Voice + OCR intake pipelines as tools (transcribe_voice, extract_intake_fields, ocr_document). Dev fixtures only; no live PHI."
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./knowledge_base", "./.files"],
+      "transport": "stdio",
+      "description": "Anthropic reference filesystem MCP. Used by the dev/eval agent to load anonymised CXR metadata, guideline PDFs, and prompt templates; write generated prompt versions and eval reports (dev only)."
+    }
+  },
+  "notes": "MCP is a dev/eval-time capability, not part of the production edge product. Production PHC deployments run fully offline with no inbound MCP surface."
+}

@@ -40,6 +40,29 @@ pytorch-grad-cam
 # RAG & Vector Database
 chromadb
 sentence-transformers
+rank-bm25            # sparse BM25 retriever for hybrid search
+llama-index-core    # indexing/retrieval orchestration
+
+# Agentic workflows & orchestration
+langgraph           # multi-step triage reasoning graph
+pydantic-ai-slim    # typed agent outputs
+mcp                 # Model Context Protocol servers (clinical-rag, intake-scribe)
+prefect             # offline job scheduling (nightly maintenance)
+
+# Risk scoring, derma, continual learning, federation
+xgboost             # deterioration risk model (needs libomp: brew install libomp)
+shap                # per-prediction risk explanations
+timm                # EfficientNet-B3 dermatology backbone
+flwr                # federated learning simulation
+ragas               # RAG evaluation metrics (eval harness)
+datasets            # eval fixtures / dataset utilities
+
+# Voice + document intake
+pytesseract         # OCR (needs tesseract: brew install tesseract tesseract-lang)
+qrcode[pil]         # LAN intake portal QR codes
+
+# Apple Silicon continual learning (optional, MLX)
+# mlx-lm            # gemma QLoRA fine-tuning on Apple Silicon
 
 # Backend API (FastAPI - lightweight, async)
 fastapi

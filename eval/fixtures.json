@@ -1,0 +1,47 @@
+{
+  "description": "Regression fixtures for the clinical RAG + triage pipeline. Each case pins the expected retrieval source and key answer points so model/prompt changes are caught before release.",
+  "cases": [
+    {
+      "id": "tb-cavitary",
+      "query": "Patient with chronic cough for 3 weeks and an upper-lobe cavitary lesion. What should I do?",
+      "expected_source_ids": ["WHO-TB-NTP"],
+      "must_mention": ["tuberculosis", "sputum", "isolat"],
+      "must_not_mention": ["antibiotic course is unnecessary"]
+    },
+    {
+      "id": "pneumonia-consolidation",
+      "query": "Focal consolidation with fever and fast breathing in an adult. Management?",
+      "expected_source_ids": ["WHO-IMCI-PNEU"],
+      "must_mention": ["pneumonia", "amoxicillin"],
+      "must_not_mention": []
+    },
+    {
+      "id": "sepsis-qsofa",
+      "query": "How do I score qSOFA for a patient with suspected sepsis?",
+      "expected_source_ids": ["SEPSIS-QSOFA"],
+      "must_mention": ["respiratory rate", "systolic", "mentation"],
+      "must_not_mention": []
+    },
+    {
+      "id": "cardiomegaly",
+      "query": "Enlarged cardiac silhouette with breathlessness and leg swelling. What next?",
+      "expected_source_ids": ["HF-TRIAGE"],
+      "must_mention": ["heart failure", "blood pressure"],
+      "must_not_mention": []
+    },
+    {
+      "id": "effusion",
+      "query": "Blunted costophrenic angle on one side in a young adult. Differential and action?",
+      "expected_source_ids": ["PLEURAL-TRIAGE"],
+      "must_mention": ["effusion", "aspiration"],
+      "must_not_mention": []
+    },
+    {
+      "id": "normal-film-symptomatic",
+      "query": "Chest X-ray is normal but the patient has had a cough for a month with weight loss. Is that reassuring?",
+      "expected_source_ids": ["NORMAL-CXR", "WHO-TB-NTP"],
+      "must_mention": ["does not exclude", "tuberculosis"],
+      "must_not_mention": ["definitely healthy"]
+    }
+  ]
+}
