@@ -289,6 +289,25 @@ export interface TriageReasonResult {
   model: string;
 }
 
+export interface RiskScoreResult {
+  qsofaScore: number;
+  qsofaFlags: string[];
+  modelProbability: number | null;
+  riskBand: string;
+  rationale: string[];
+  shapContributions: Record<string, number>;
+}
+
+export interface RiskScoreRequest {
+  age?: number;
+  vitalTemp?: number;
+  vitalHr?: number;
+  vitalResp?: number;
+  vitalSpo2?: number;
+  vitalBp?: string;
+  aiConfidence?: number;
+}
+
 export interface DermaResult {
   imagePath: string;
   label: string;
@@ -650,6 +669,16 @@ export const api = {
   async triageReason(patientId: string): Promise<TriageReasonResult> {
     const res = await fetch(`${API_BASE}/agents/triage-reason/${patientId}`, { method: "POST" });
     if (!res.ok) throw new Error("Failed to run triage reasoner");
+    return res.json();
+  },
+
+  async riskScore(payload: RiskScoreRequest): Promise<RiskScoreResult> {
+    const res = await fetch(`${API_BASE}/risk/score`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Failed to score risk");
     return res.json();
   },
 

@@ -34,6 +34,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
+import { ClinicalDecisionSupport } from "../ClinicalDecisionSupport";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -877,6 +878,9 @@ export function CaseReview() {
                   />
                 </div>
               </div>
+
+              {/* ── AI DECISION SUPPORT (risk + agents) ── */}
+              <ClinicalDecisionSupport caseData={caseData} />
 
               {/* ── CLINICAL NOTES ── */}
               <div className="rounded-lg border border-slate-200 border-l-[3px] border-l-amber-400 overflow-hidden">
