@@ -38,6 +38,10 @@ export const router = createBrowserRouter([
         lazy: async () => ({ Component: (await import("./components/screens/EHR")).EHR }),
       },
       {
+        path: "insights",
+        lazy: async () => ({ Component: (await import("./components/screens/Insights")).Insights }),
+      },
+      {
         path: "settings",
         lazy: async () => ({ Component: (await import("./components/screens/SystemStatus")).SystemStatus }),
       },

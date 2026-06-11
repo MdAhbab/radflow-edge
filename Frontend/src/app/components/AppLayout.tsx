@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   User,
+  BarChart3,
 } from "lucide-react";
 import { api } from "../../api";
 import { Separator } from "./ui/separator";
@@ -137,6 +138,7 @@ export function AppLayout() {
     { path: "/dashboard/new-report",  label: "New Submission", icon: FilePlus,    badge: null },
     { path: "/dashboard/escalations", label: "Escalations",   icon: AlertTriangle, badge: isOffline ? null : stats.escalations || null },
     { path: "/dashboard/ehr",         label: "EHR",            icon: Database,    badge: null },
+    { path: "/dashboard/insights",    label: "Insights",       icon: BarChart3,   badge: null },
   ];
   const systemNav = [{ path: "/dashboard/settings", label: "System", icon: Settings }];
 

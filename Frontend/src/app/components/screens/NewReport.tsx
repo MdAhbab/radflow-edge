@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { Upload, FileImage, ClipboardList, Loader2, Link as LinkIcon } from "lucide-react";
+import { Upload, FileImage, ClipboardList, Loader2, Link as LinkIcon, Mic, Square } from "lucide-react";
 import { api } from "../../../api";
+import { IntakeRecorder } from "../../lib/audio-recorder";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -26,10 +27,22 @@ export function NewReport() {
     sex: "Male",
     complaint: "",
     patientIdLinked: "",
+    vitalTemp: "",
+    vitalHr: "",
+    vitalBp: "",
+    vitalResp: "",
+    vitalSpo2: "",
+    vitalWeight: "",
+    riskFactors: "",
+    clinicalNotes: "",
   });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const previewUrlRef = useRef<string | null>(null);
+  const recorderRef = useRef<IntakeRecorder | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcript, setTranscript] = useState<string | null>(null);
 
   // Object URLs must be revoked or each selected file leaks until reload.
   const setPreviewUrl = (url: string | null) => {
@@ -41,8 +54,59 @@ export function NewReport() {
   useEffect(() => {
     return () => {
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      recorderRef.current?.cancel();
     };
   }, []);
+
+  const handleVoiceIntake = async () => {
+    if (recording) {
+      const recorder = recorderRef.current;
+      if (!recorder) return;
+      setRecording(false);
+      setTranscribing(true);
+      try {
+        const wav = await recorder.stop();
+        const result = await api.voiceIntake(wav);
+        setTranscript(result.transcript);
+        const f = result.fields;
+        setFormData((prev) => ({
+          ...prev,
+          name: f.name ?? prev.name,
+          age: f.age != null ? String(f.age) : prev.age,
+          sex: f.sex ? normalizeSexForUI(f.sex) : prev.sex,
+          complaint: f.complaint ?? prev.complaint,
+          vitalTemp: f.vital_temp != null ? String(f.vital_temp) : prev.vitalTemp,
+          vitalHr: f.vital_hr != null ? String(f.vital_hr) : prev.vitalHr,
+          vitalBp: f.vital_bp ?? prev.vitalBp,
+          vitalResp: f.vital_resp != null ? String(f.vital_resp) : prev.vitalResp,
+          vitalSpo2: f.vital_spo2 != null ? String(f.vital_spo2) : prev.vitalSpo2,
+          vitalWeight: f.vital_weight != null ? String(f.vital_weight) : prev.vitalWeight,
+          riskFactors: f.risk_factors ?? prev.riskFactors,
+          clinicalNotes: f.clinical_notes ?? prev.clinicalNotes,
+        }));
+        const filled = Object.values(result.fields).filter((v) => v != null).length;
+        toast.success(`Voice intake filled ${filled} field${filled === 1 ? "" : "s"}. Review before submitting.`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Voice intake failed";
+        toast.error(message);
+      } finally {
+        setTranscribing(false);
+        recorderRef.current = null;
+      }
+      return;
+    }
+
+    try {
+      const recorder = new IntakeRecorder();
+      await recorder.start();
+      recorderRef.current = recorder;
+      setTranscript(null);
+      setRecording(true);
+      toast.info("Recording — speak the patient details in Bangla or English, then press Stop.");
+    } catch {
+      toast.error("Microphone access was denied or is unavailable.");
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -121,6 +185,14 @@ export function NewReport() {
         triageColor: "green" as const,
         confidence: 0,
         patientId: formData.patientIdLinked || undefined,
+        vitalTemp: formData.vitalTemp ? parseFloat(formData.vitalTemp) : undefined,
+        vitalHr: formData.vitalHr ? parseInt(formData.vitalHr) : undefined,
+        vitalBp: formData.vitalBp || undefined,
+        vitalResp: formData.vitalResp ? parseInt(formData.vitalResp) : undefined,
+        vitalSpo2: formData.vitalSpo2 ? parseFloat(formData.vitalSpo2) : undefined,
+        vitalWeight: formData.vitalWeight ? parseFloat(formData.vitalWeight) : undefined,
+        riskFactors: formData.riskFactors || undefined,
+        clinicalNotes: formData.clinicalNotes || undefined,
       });
 
       localStorage.setItem("hsil_last_viewed_case", createdCase.patientId);
@@ -192,7 +264,42 @@ export function NewReport() {
 
             {/* Right Column: Patient Data */}
             <div className="space-y-5">
-              <h3 className="font-medium text-slate-700">Patient Origin Information</h3>
+              <div className="flex items-center justify-between">
+                <h3 className="font-medium text-slate-700">Patient Origin Information</h3>
+                <Button
+                  type="button"
+                  variant={recording ? "destructive" : "outline"}
+                  size="sm"
+                  onClick={handleVoiceIntake}
+                  disabled={transcribing}
+                  aria-label={recording ? "Stop recording" : "Start voice intake"}
+                >
+                  {transcribing ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Transcribing…</>
+                  ) : recording ? (
+                    <><Square className="w-4 h-4" /> Stop &amp; Fill Form</>
+                  ) : (
+                    <><Mic className="w-4 h-4" /> Voice Intake</>
+                  )}
+                </Button>
+              </div>
+
+              {recording && (
+                <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                    <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                  </span>
+                  Listening — Bangla, English, or mixed. Mention name, age, complaint, and vitals.
+                </div>
+              )}
+
+              {transcript && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-slate-700">
+                  <p className="text-xs font-medium text-blue-600 mb-1">Heard (verify against the form):</p>
+                  <p className="whitespace-pre-wrap">{transcript}</p>
+                </div>
+              )}
 
               {/* Link Patient ID */}
               <div className="space-y-1.5">
@@ -263,6 +370,52 @@ export function NewReport() {
                 />
               </div>
 
+              <hr className="border-slate-100" />
+
+              <h3 className="font-medium text-slate-700">Vitals &amp; History (optional)</h3>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-temp">Temp (°F)</Label>
+                  <Input id="vital-temp" name="vitalTemp" type="number" step="0.1" value={formData.vitalTemp} onChange={handleChange} placeholder="98.6" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-hr">Heart Rate</Label>
+                  <Input id="vital-hr" name="vitalHr" type="number" value={formData.vitalHr} onChange={handleChange} placeholder="72" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-bp">BP</Label>
+                  <Input id="vital-bp" name="vitalBp" value={formData.vitalBp} onChange={handleChange} placeholder="120/80" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-resp">Resp Rate</Label>
+                  <Input id="vital-resp" name="vitalResp" type="number" value={formData.vitalResp} onChange={handleChange} placeholder="16" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-spo2">SpO₂ (%)</Label>
+                  <Input id="vital-spo2" name="vitalSpo2" type="number" step="0.1" value={formData.vitalSpo2} onChange={handleChange} placeholder="98" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="vital-weight">Weight (kg)</Label>
+                  <Input id="vital-weight" name="vitalWeight" type="number" step="0.1" value={formData.vitalWeight} onChange={handleChange} placeholder="60" />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="risk-factors">Risk Factors</Label>
+                <Input id="risk-factors" name="riskFactors" value={formData.riskFactors} onChange={handleChange} placeholder="e.g. smoker, diabetes" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="clinical-notes">Clinical Notes</Label>
+                <Textarea
+                  id="clinical-notes"
+                  name="clinicalNotes"
+                  rows={2}
+                  value={formData.clinicalNotes}
+                  onChange={handleChange}
+                  className="resize-none"
+                  placeholder="Anything else observed during intake"
+                />
+              </div>
+
             </div>
           </div>
 
@@ -272,10 +425,15 @@ export function NewReport() {
               variant="outline"
               disabled={loading}
               onClick={() => {
-                setFormData({ name: "", age: "", sex: "Male", complaint: "", patientIdLinked: "" });
+                setFormData({
+                  name: "", age: "", sex: "Male", complaint: "", patientIdLinked: "",
+                  vitalTemp: "", vitalHr: "", vitalBp: "", vitalResp: "", vitalSpo2: "",
+                  vitalWeight: "", riskFactors: "", clinicalNotes: "",
+                });
                 setSelectedFile(null);
                 setPreviewUrl(null);
                 setLinkedPatientFound(false);
+                setTranscript(null);
               }}
             >
               Clear

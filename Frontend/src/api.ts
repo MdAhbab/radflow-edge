@@ -244,6 +244,61 @@ export interface AnalyzeXrayResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface VoiceIntakeFields {
+  name: string | null;
+  age: number | null;
+  sex: string | null;
+  complaint: string | null;
+  vital_temp: number | null;
+  vital_hr: number | null;
+  vital_bp: string | null;
+  vital_resp: number | null;
+  vital_spo2: number | null;
+  vital_weight: number | null;
+  risk_factors: string | null;
+  clinical_notes: string | null;
+}
+
+export interface VoiceIntakeResult {
+  transcript: string;
+  fields: VoiceIntakeFields;
+  missing_fields: string[];
+  model: string;
+}
+
+export interface AnalyticsSummary {
+  triageDistribution: { name: string; value: number }[];
+  topFindings: { name: string; count: number }[];
+  confidenceTrend: { patientId: string; confidence: number }[];
+  totalCases: number;
+  shapExample: { feature: string; contribution: number }[];
+}
+
+export interface LanInfo {
+  url: string;
+  qrDataUrl: string;
+}
+
+export interface TriageReasonResult {
+  reasoning: string;
+  citations: string[];
+  riskBand: string;
+  riskRationale: string[];
+  decision: string;
+  patientId: string;
+  model: string;
+}
+
+export interface DermaResult {
+  imagePath: string;
+  label: string;
+  confidence: number;
+  triageBand: string;
+  advice: string;
+  differential: { label: string; confidence: number }[];
+  fineTuned: boolean;
+}
+
 export interface ChatResponse {
   response: string;
 }
@@ -537,6 +592,26 @@ export const api = {
     return data.imagePath;
   },
 
+  async voiceIntake(audio: Blob): Promise<VoiceIntakeResult> {
+    const formData = new FormData();
+    formData.append("file", audio, "intake.wav");
+    const res = await fetch(`${API_BASE}/intake/voice`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      let detail = "Voice intake failed";
+      try {
+        const err = await res.json();
+        if (err?.detail) detail = String(err.detail);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    return res.json();
+  },
+
   async askClinicalCopilot(patientId: string, message: string): Promise<string> {
     const res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
@@ -546,6 +621,54 @@ export const api = {
     if (!res.ok) throw new Error("Failed to query AI copilot");
     const data: ChatResponse = await res.json();
     return data.response;
+  },
+
+  async getAnalyticsSummary(): Promise<AnalyticsSummary> {
+    const res = await fetch(`${API_BASE}/analytics/summary`);
+    if (!res.ok) throw new Error("Failed to fetch analytics");
+    return res.json();
+  },
+
+  async getLanInfo(): Promise<LanInfo> {
+    const res = await fetch(`${API_BASE}/lan/info`);
+    if (!res.ok) throw new Error("Failed to fetch LAN info");
+    return res.json();
+  },
+
+  async getMorningBriefing(): Promise<{ briefing: string; caseCount: number }> {
+    const res = await fetch(`${API_BASE}/agents/briefing`, { method: "POST" });
+    if (!res.ok) throw new Error("Failed to generate briefing");
+    return res.json();
+  },
+
+  async draftEscalation(patientId: string): Promise<{ draft: string }> {
+    const res = await fetch(`${API_BASE}/agents/escalation-draft/${patientId}`, { method: "POST" });
+    if (!res.ok) throw new Error("Failed to draft escalation");
+    return res.json();
+  },
+
+  async triageReason(patientId: string): Promise<TriageReasonResult> {
+    const res = await fetch(`${API_BASE}/agents/triage-reason/${patientId}`, { method: "POST" });
+    if (!res.ok) throw new Error("Failed to run triage reasoner");
+    return res.json();
+  },
+
+  async runMaintenance(): Promise<{ status: string }> {
+    const res = await fetch(`${API_BASE}/maintenance/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) throw new Error("Maintenance run failed");
+    return res.json();
+  },
+
+  async analyzeDerma(file: File): Promise<DermaResult> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${API_BASE}/derma/analyze`, { method: "POST", body: formData });
+    if (!res.ok) throw new Error("Dermatology analysis failed");
+    return res.json();
   },
 
   async getEhrTimeline(patientId: string): Promise<EHRTimelineEntry[]> {
