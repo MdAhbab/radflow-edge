@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import uuid
@@ -102,6 +103,10 @@ from model_executor import (
     unload_local_llm,
     current_model_slot,
     recent_slot_history,
+    prepare_runtime,
+    register_ollama_target,
+    system_under_memory_pressure,
+    note_runtime_freed,
 )
 
 # Configurable triage policy rules (can be replaced per-hospital).
@@ -1055,8 +1060,10 @@ def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[
         try:
             # The VLM needs the whole memory budget: release torch caches
             # from the detector stage and evict the local LLM before it runs.
+            # Keep the coordinator's resident-runtime view in sync.
             neutralize_torch()
             unload_local_llm(_get_ollama_base_url(), _get_local_llm_model())
+            note_runtime_freed("ollama")
             analysis_start = time.perf_counter()
             with model_slot("chexagent:vlm"):
                 analysis_text = analyzer.analyze(
@@ -1081,28 +1088,38 @@ def _run_experiment1_locked(image_path: str, patient_context: str = "") -> Dict[
             analyzer_state = f"error: {ex}"
 
     if finding_items[0].get("report") is None:
-        # Detector stage is done — hand the memory budget to the local LLM.
+        # Detector stage is done — free its tensors before the VLM runs.
         neutralize_torch()
         narrative_start = time.perf_counter()
-        gemma_text = _gemma_narrative_report(
+        # Retrieve guideline context once; share it between the MLX and the
+        # Ollama narrative paths so RAG runs a single time per analysis. Skip
+        # HyDE here: it would load the Ollama model only for the MLX VLM to
+        # evict it moments later, churning memory on the 8GB box.
+        guideline_block, citations = _retrieve_guideline_context(
+            disease, patient_context, use_hyde=False
+        )
+
+        narrative_text, narrative_engine = _radiology_narrative(
             crops[0]["image"] if crops else None,
             image_path,
             disease,
             float(confidence),
             patient_context,
+            guideline_block,
+            citations,
         )
-        if gemma_text:
+        if narrative_text:
             analysis_ms = (time.perf_counter() - narrative_start) * 1000.0
             differential_diagnosis = (
-                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
+                _extract_report_section(narrative_text, _REPORT_SECTION_ALIASES["differential_diagnosis"])
                 or differential_diagnosis
             )
             recommended_steps = (
-                _extract_report_section(gemma_text, _REPORT_SECTION_ALIASES["future_steps"])
+                _extract_report_section(narrative_text, _REPORT_SECTION_ALIASES["future_steps"])
                 or recommended_steps
             )
-            finding_items[0]["report"] = gemma_text
-            analyzer_state = f"local_llm:{_get_local_llm_model()}"
+            finding_items[0]["report"] = narrative_text
+            analyzer_state = narrative_engine
 
     triage_color, priority = _priority_from_confidence(float(confidence))
     report_text = finding_items[0].get("report") or (
@@ -1962,9 +1979,25 @@ def _execute_analysis_request(
     return analysis
 
 
+def _wait_out_memory_pressure(max_wait_sec: float = 30.0, poll_sec: float = 3.0) -> None:
+    """Block until macOS swap pressure eases or the bound elapses. Keeps a
+    backlog of analysis jobs from driving the 8GB device into a swap
+    death-spiral, without ever stalling forever."""
+    waited = 0.0
+    while system_under_memory_pressure() and waited < max_wait_sec:
+        time.sleep(poll_sec)
+        waited += poll_sec
+
+
 def _inference_worker_loop() -> None:
+    # Let the executor evict the Ollama model when MLX radiology needs RAM.
+    register_ollama_target(_get_ollama_base_url(), _get_local_llm_model())
     while True:
         job_id = INFERENCE_QUEUE.get()
+        # Backpressure: on a swap-pressured 8GB box, wait for memory to
+        # settle before starting another model rather than thrashing. Bounded
+        # so a permanently-pressured box still makes progress.
+        _wait_out_memory_pressure()
         db = SessionLocal()
         try:
             job = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
@@ -2969,8 +3002,18 @@ def _is_local_llm_available() -> bool:
     return available
 
 
+def _ollama_num_ctx() -> int:
+    """Context window for Ollama calls. The model default is 131072, which
+    allocates an enormous KV cache; our prompts fit comfortably in 4096, so
+    capping it is the single biggest per-call memory saving on 8GB."""
+    try:
+        return int(os.getenv("HSIL_OLLAMA_NUM_CTX", "4096"))
+    except ValueError:
+        return 4096
+
+
 def _ollama_chat(messages: List[Dict[str, Any]], timeout_sec: float, num_predict: Optional[int] = None) -> str:
-    options: Dict[str, Any] = {"temperature": 0.2, "top_p": 0.9}
+    options: Dict[str, Any] = {"temperature": 0.2, "top_p": 0.9, "num_ctx": _ollama_num_ctx()}
     if num_predict:
         options["num_predict"] = num_predict
     payload = {
@@ -2980,13 +3023,16 @@ def _ollama_chat(messages: List[Dict[str, Any]], timeout_sec: float, num_predict
         # Gemma 4 is a thinking model; without this its hidden reasoning
         # consumes the token budget and the visible answer comes back empty.
         "think": False,
-        "keep_alive": os.getenv("HSIL_OLLAMA_KEEP_ALIVE", "5m"),
+        "keep_alive": os.getenv("HSIL_OLLAMA_KEEP_ALIVE", "30s"),
         "options": options,
     }
     with model_slot(f"local_llm:{payload['model']}"):
+        # Gemma services share the box with the MLX radiology VLM; make
+        # Ollama the resident runtime (evicting MLX) before this call.
+        prepare_runtime("ollama")
         resp = requests.post(f"{_get_ollama_base_url()}/api/chat", json=payload, timeout=timeout_sec)
-    resp.raise_for_status()
-    content = str((resp.json().get("message") or {}).get("content") or "").strip()
+        resp.raise_for_status()
+        content = str((resp.json().get("message") or {}).get("content") or "").strip()
     if not content:
         raise RuntimeError("Local model returned an empty response")
     return content
@@ -3021,12 +3067,13 @@ def _ollama_audio_chat(
         "temperature": 0.1,
     }
     with model_slot(f"local_llm:{payload['model']}:audio"):
+        prepare_runtime("ollama")
         resp = requests.post(
             f"{_get_ollama_base_url()}/v1/chat/completions", json=payload, timeout=timeout_sec
         )
-    resp.raise_for_status()
-    choices = resp.json().get("choices") or [{}]
-    content = str((choices[0].get("message") or {}).get("content") or "").strip()
+        resp.raise_for_status()
+        choices = resp.json().get("choices") or [{}]
+        content = str((choices[0].get("message") or {}).get("content") or "").strip()
     if not content:
         raise RuntimeError("Local model returned an empty response for audio input")
     return content
@@ -3054,11 +3101,16 @@ def _hyde_expand(query: str) -> str:
         return ""
 
 
-def _retrieve_guideline_context(disease: str, patient_context: str) -> tuple:
+def _retrieve_guideline_context(disease: str, patient_context: str, use_hyde: bool = True) -> tuple:
     """Hybrid-retrieve cited guideline passages for a finding.
 
     Returns (context_block, [citation strings]). Empty on any failure so
     the narrative still generates without grounding rather than erroring.
+
+    ``use_hyde`` runs an Ollama HyDE expansion to widen recall. The radiology
+    narrative path sets it False: HyDE would load the Ollama Gemma model just
+    to be evicted again when the MLX VLM runs, churning memory on the 8GB box.
+    Hybrid BM25+dense+rerank retrieval is already strong without it.
     """
     if os.getenv("HSIL_DISABLE_RAG", "0") == "1":
         return "", []
@@ -3067,11 +3119,66 @@ def _retrieve_guideline_context(disease: str, patient_context: str) -> tuple:
 
         rag = get_rag_engine()
         query = f"{disease}. {patient_context}".strip()
-        passages = rag.retrieve(query, top_k=3, hyde_fn=_hyde_expand)
+        passages = rag.retrieve(query, top_k=3, hyde_fn=_hyde_expand if use_hyde else None)
         return rag.context_block(passages), [p.citation() for p in passages]
     except Exception as ex:
         _write_event("rag_retrieval_failed", {"error": str(ex)[:300]})
         return "", []
+
+
+def _radiology_narrative(
+    crop_img: Optional[Any],
+    image_path: str,
+    disease: str,
+    confidence: float,
+    patient_context: str,
+    guideline_block: str,
+    citations: List[str],
+) -> tuple:
+    """Produce the chest-X-ray narrative, MLX first with Ollama fallback.
+
+    The radiology VLM runs on Apple MLX (backend/mlx_radiology.py); if MLX
+    is disabled, the model can't load, or generation fails, this falls
+    back to the Ollama Gemma narrative. Returns (report_text, engine_label)
+    where engine_label feeds the analyzer state for telemetry. Both paths
+    receive the already-retrieved guideline context so RAG runs once.
+    """
+    # MLX path: write the focused crop to a temp PNG the VLM can read.
+    try:
+        from mlx_radiology import is_enabled as mlx_enabled
+
+        if mlx_enabled():
+            mlx_image_path = image_path
+            tmp_crop = None
+            if crop_img is not None:
+                tmp_crop = _write_temp_png_from_array(crop_img)
+                mlx_image_path = tmp_crop
+            try:
+                import mlx_radiology
+
+                mlx_text = mlx_radiology.generate_report(
+                    mlx_image_path, disease, float(confidence), patient_context, guideline_block
+                )
+            finally:
+                if tmp_crop:
+                    try:
+                        os.remove(tmp_crop)
+                    except OSError:
+                        pass
+            if mlx_text:
+                if citations:
+                    mlx_text = mlx_text.rstrip() + "\n\nGUIDELINE SOURCES: " + "; ".join(citations)
+                return mlx_text, f"mlx:{os.getenv('HSIL_MLX_RADIOLOGY_MODEL', 'mlx-community/gemma-3-4b-it-4bit')}"
+    except Exception as ex:
+        _write_event("mlx_radiology_failed", {"error": str(ex)[:300]})
+
+    # Ollama fallback.
+    ollama_text = _gemma_narrative_report(
+        crop_img, image_path, disease, confidence, patient_context, guideline_block, citations
+    )
+    if ollama_text:
+        return ollama_text, f"local_llm:{_get_local_llm_model()}"
+    return None, "unavailable"
 
 
 def _gemma_narrative_report(
@@ -3080,15 +3187,17 @@ def _gemma_narrative_report(
     disease: str,
     confidence: float,
     patient_context: str,
+    guideline_block: Optional[str] = None,
+    citations: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Generate a structured, guideline-cited draft report with Gemma 4
-    E2B vision.
+    E2B vision via Ollama (the radiology-path fallback when MLX is
+    unavailable; also usable standalone).
 
-    Used when the CheXagent analyzer is unavailable (the default on
-    non-CUDA edge devices). Retrieves WHO/NTP guideline passages and asks
-    the model to ground its answer in them with [SOURCE-ID] citations.
-    Returns None when the local model is disabled, unreachable, or fails —
-    callers keep their detector-only fallback.
+    Retrieves WHO/NTP guideline passages (unless pre-supplied) and asks the
+    model to ground its answer in them with [SOURCE-ID] citations. Returns
+    None when the local model is disabled, unreachable, or fails — callers
+    keep their detector-only fallback.
     """
     if os.getenv("HSIL_DISABLE_GEMMA_ANALYZER", "0") == "1":
         return None
@@ -3108,7 +3217,9 @@ def _gemma_narrative_report(
             with open(image_path, "rb") as fp:
                 image_b64 = base64.b64encode(fp.read()).decode("ascii")
 
-        guideline_block, citations = _retrieve_guideline_context(disease, patient_context)
+        if guideline_block is None:
+            guideline_block, citations = _retrieve_guideline_context(disease, patient_context)
+        citations = citations or []
         guideline_section = (
             f"\nRELEVANT CLINICAL GUIDELINES (cite these by [SOURCE-ID]):\n{guideline_block}\n"
             if guideline_block
@@ -3356,11 +3467,14 @@ async def voice_intake(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="Local model is not available; type the intake manually")
 
     try:
-        raw = _ollama_audio_chat(
+        # Offload the blocking model call so it doesn't stall the uvicorn
+        # event loop (and every other route) for the call's duration.
+        raw = await asyncio.to_thread(
+            _ollama_audio_chat,
             INTAKE_PROMPT,
             base64.b64encode(audio_bytes).decode("ascii"),
-            audio_format=file_ext.lstrip("."),
-            timeout_sec=_read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 180.0),
+            file_ext.lstrip("."),
+            _read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 180.0),
         )
         result = parse_intake_response(raw)
     except ValueError as ex:
@@ -3405,7 +3519,8 @@ async def document_intake(
     with open(saved_path, "wb") as fp:
         fp.write(raw_bytes)
 
-    ocr_text = ocr_image(saved_path, os.getenv("HSIL_OCR_LANGS", "ben+eng"))
+    # OCR and the model call are blocking; run them off the event loop.
+    ocr_text = await asyncio.to_thread(ocr_image, saved_path, os.getenv("HSIL_OCR_LANGS", "ben+eng"))
     if not ocr_text:
         raise HTTPException(status_code=422, detail="Could not read any text from the document")
 
@@ -3413,10 +3528,11 @@ async def document_intake(
     if _is_local_llm_available():
         try:
             image_b64 = base64.b64encode(raw_bytes).decode("ascii")
-            raw = _ollama_chat(
+            raw = await asyncio.to_thread(
+                _ollama_chat,
                 [{"role": "user", "content": EXTRACT_PROMPT + ocr_text[:4000], "images": [image_b64]}],
-                timeout_sec=_read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 120.0),
-                num_predict=500,
+                _read_env_float("HSIL_GEMMA_TIMEOUT_SEC", 120.0),
+                500,
             )
             extracted = parse_extraction(raw)
         except Exception as ex:
@@ -3719,12 +3835,17 @@ async def derma_analyze(file: UploadFile = File(...)):
     with open(saved_path, "wb") as fp:
         fp.write(raw)
 
-    try:
+    def _run_derma():
         from derma_engine import get_derma_classifier
 
         with model_slot("derma:efficientnet_b3"):
-            result = get_derma_classifier().classify(saved_path)
+            res = get_derma_classifier().classify(saved_path)
         neutralize_torch()
+        return res
+
+    try:
+        # Torch inference is blocking; keep it off the event loop.
+        result = await asyncio.to_thread(_run_derma)
     except Exception as ex:
         cid = uuid.uuid4().hex[:12]
         print(f"CRITICAL ERROR [{cid}] POST /api/v1/derma/analyze: {ex}")

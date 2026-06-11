@@ -10,13 +10,20 @@ The lock is re-entrant: a pipeline that invokes the narrative model as a
 sub-stage of an already-held slot does not deadlock. Stage transitions
 call ``neutralize_torch()`` / ``unload_local_llm()`` so the outgoing
 model's memory is released before the next one starts.
+
+Two language/vision runtimes coexist in the codebase — **MLX-VLM** for the
+chest-X-ray radiology narrative and **Ollama** for the Gemma services
+(voice, chat, agents, OCR). On 8GB they must never be resident together.
+``prepare_runtime(target)`` evicts whichever runtime is NOT the target
+before it runs, and is always called inside the slot lock so two requests
+can't load both runtimes at once.
 """
 
 import gc
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import requests
 
@@ -25,6 +32,12 @@ MODEL_SLOT = threading.RLock()
 _CURRENT: Dict[str, Any] = {"label": None, "since": None, "depth": 0}
 _HISTORY_MAX = 50
 _HISTORY: list = []
+
+# Which language/vision runtime currently holds resident memory.
+_RESIDENT_RUNTIME: Optional[str] = None
+# The MLX module registers a free callback here to avoid a circular import.
+_MLX_FREE_HOOK: Optional[Callable[[], None]] = None
+_OLLAMA_EVICT: Dict[str, str] = {"base_url": "", "model": ""}
 
 
 def current_model_slot() -> Dict[str, Any]:
@@ -96,5 +109,75 @@ def unload_local_llm(base_url: str, model: str, timeout: float = 10.0) -> bool:
             timeout=timeout,
         )
         return resp.ok
+    except Exception:
+        return False
+
+
+def register_mlx_free_hook(fn: Callable[[], None]) -> None:
+    """The MLX radiology module registers its model-free callback here so
+    the coordinator can evict it without importing mlx (circular)."""
+    global _MLX_FREE_HOOK
+    _MLX_FREE_HOOK = fn
+
+
+def register_ollama_target(base_url: str, model: str) -> None:
+    """Record the Ollama endpoint/model so the coordinator can evict it."""
+    _OLLAMA_EVICT["base_url"] = base_url
+    _OLLAMA_EVICT["model"] = model
+
+
+def prepare_runtime(target: str) -> None:
+    """Make ``target`` ('mlx' or 'ollama') the sole resident runtime by
+    evicting the other. Call inside the slot lock, before loading/running
+    the target. Idempotent when the target is already resident.
+
+    MLX and Ollama each hold multiple GB on this box; co-residency pushes
+    the 8GB device straight into swap, so this is the load-bearing memory
+    guarantee, not an optimization.
+    """
+    global _RESIDENT_RUNTIME
+    # Hold the slot so the resident-runtime read/modify/write is atomic even
+    # if a caller forgets to wrap this; re-entrant, so nesting is free.
+    with MODEL_SLOT:
+        if target == _RESIDENT_RUNTIME:
+            return
+        if target == "mlx":
+            # Free the Ollama model before MLX allocates.
+            if _OLLAMA_EVICT["base_url"] and _OLLAMA_EVICT["model"]:
+                unload_local_llm(_OLLAMA_EVICT["base_url"], _OLLAMA_EVICT["model"])
+        elif target == "ollama":
+            # Free the MLX model before Ollama loads.
+            if _MLX_FREE_HOOK is not None:
+                try:
+                    _MLX_FREE_HOOK()
+                except Exception:
+                    pass
+        neutralize_torch()
+        _RESIDENT_RUNTIME = target
+
+
+def resident_runtime() -> Optional[str]:
+    return _RESIDENT_RUNTIME
+
+
+def note_runtime_freed(runtime: str) -> None:
+    """Called when a runtime frees itself (e.g. MLX after generate) so the
+    coordinator's view stays accurate. Synchronized on the slot."""
+    global _RESIDENT_RUNTIME
+    with MODEL_SLOT:
+        if _RESIDENT_RUNTIME == runtime:
+            _RESIDENT_RUNTIME = None
+
+
+def system_under_memory_pressure(swap_used_threshold_mb: float = 2200.0) -> bool:
+    """True when macOS swap usage is high enough that starting another
+    model would thrash. The async job worker checks this before pulling a
+    new inference job so a backlog can't drive the device into a swap
+    death-spiral. Conservative: returns False if psutil is unavailable."""
+    try:
+        import psutil
+
+        swap = psutil.swap_memory()
+        return (swap.used / (1024 * 1024)) >= swap_used_threshold_mb
     except Exception:
         return False

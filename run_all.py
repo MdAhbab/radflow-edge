@@ -224,6 +224,19 @@ def start_backend(pipeline_mode: str = "experiment1"):
         backend_env = os.environ.copy()
         backend_env["HSIL_PIPELINE_MODE"] = pipeline_mode
 
+        # Memory governance for the 8GB edge box. These are read by the
+        # backend and applied per Ollama request, so they take effect even
+        # though Ollama runs as a separate service:
+        #   - num_ctx 4096 caps the KV cache (model default is 131072).
+        #   - keep_alive 30s frees Gemma quickly so the MLX radiology VLM and
+        #     the torch detector have headroom.
+        # Server-side KV-cache quantization (OLLAMA_FLASH_ATTENTION=1,
+        # OLLAMA_KV_CACHE_TYPE=q8_0) must be set in the Ollama service's own
+        # environment before `ollama serve` — see guide.md. Set defaults only;
+        # never clobber an operator override.
+        backend_env.setdefault("HSIL_OLLAMA_NUM_CTX", "4096")
+        backend_env.setdefault("HSIL_OLLAMA_KEEP_ALIVE", "30s")
+
         # Hot reload is opt-in: the watchfiles reloader keeps a second watcher
         # process alive and adds steady CPU/memory load on long-running devices.
         uvicorn_args = [sys.executable, "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

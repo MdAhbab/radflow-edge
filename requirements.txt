@@ -61,7 +61,8 @@ datasets            # eval fixtures / dataset utilities
 pytesseract         # OCR (needs tesseract: brew install tesseract tesseract-lang)
 qrcode[pil]         # LAN intake portal QR codes
 
-# Apple Silicon continual learning (optional, MLX)
+# Apple Silicon — MLX radiology VLM + continual learning
+mlx-vlm             # chest-X-ray radiology narrative (Apple Silicon only)
 # mlx-lm            # gemma QLoRA fine-tuning on Apple Silicon
 
 # Backend API (FastAPI - lightweight, async)
