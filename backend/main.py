@@ -198,6 +198,17 @@ async def activity_middleware(request: Request, call_next):
     return response
 
 
+@app.exception_handler(UnicodeDecodeError)
+async def malformed_body_handler(request: Request, exc: UnicodeDecodeError):
+    # A binary/wrong-content-type body sent to a JSON endpoint (e.g. a file
+    # posted to /foveal) is a client error, not a server fault — return 400
+    # with guidance rather than a 500 with a correlation id.
+    return JSONResponse(
+        status_code=400,
+        content={"message": "Malformed request body — expected JSON. Check the Content-Type and payload."},
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     global RECENT_ERROR_COUNT
