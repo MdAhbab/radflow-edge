@@ -74,14 +74,21 @@ Weights land at `models/xrv/` and `models/chexagent/`. Move the whole project fo
 
 ```bash
 ollama pull gemma4:e2b   # ~5 GB download, one time
-ollama serve             # keep this running in a separate terminal
+
+# On a memory-constrained box (8 GB), start Ollama with a quantized KV cache.
+# These are read by the Ollama service itself, so set them before `ollama serve`:
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
 ```
 
-Gemma 4 E2B is used for:
-- Narrative report generation (when CheXagent is unavailable)
-- Copilot chat responses
+Gemma 4 E2B (via Ollama) powers the **Gemma services**: voice intake, copilot
+chat, the agentic workflows, and document OCR extraction. The **chest-X-ray
+radiology narrative** runs separately on Apple MLX (`mlx-vlm`); the two model
+runtimes are never resident at the same time. See the *Memory governance*
+section of `README.md` for the full picture.
 
-The backend detects Ollama on startup. If it's not running you'll see a warning in the terminal but the rest of the app still works (analysis jobs fall back to detector-only output).
+The backend detects Ollama on startup. If it's not running you'll see a warning
+in the terminal but the rest of the app still works (the radiology path falls
+back, and other features degrade gracefully).
 
 ---
 
