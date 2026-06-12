@@ -1761,6 +1761,18 @@ class CaseUpdateSchema(BaseModel):
     differential_diagnosis: Optional[str] = Field(None, alias="differentialDiagnosis")
     recommended_steps: Optional[str] = Field(None, alias="recommendedSteps")
     ai_draft_report: Optional[str] = Field(None, alias="aiDraftReport")
+    # Vitals are editable in Case Review; without these the autosave silently
+    # dropped them so deterioration risk scored against stale/empty vitals.
+    name: Optional[str] = None
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    complaint: Optional[str] = None
+    vital_temp: Optional[float] = Field(None, alias="vitalTemp")
+    vital_hr: Optional[int] = Field(None, alias="vitalHr")
+    vital_bp: Optional[str] = Field(None, alias="vitalBp")
+    vital_resp: Optional[int] = Field(None, alias="vitalResp")
+    vital_spo2: Optional[float] = Field(None, alias="vitalSpo2")
+    vital_weight: Optional[float] = Field(None, alias="vitalWeight")
 
 class EscalationBase(BaseModel):
     name: str
@@ -1936,7 +1948,6 @@ def _job_row_to_status(row: InferenceJob) -> AnalyzeJobStatus:
 
 
 def _execute_analysis_request(
-    db: Session,
     image_path: str,
     patient_context: str,
     patient_id: Optional[str],
@@ -1946,33 +1957,43 @@ def _execute_analysis_request(
     run_id = uuid.uuid4().hex
     started = time.perf_counter()
 
-    db_case: Optional[Case] = None
-    if patient_id:
-        db_case = (
-            db.query(Case)
-            .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
-            .order_by(Case.id.desc())
-            .first()
-        )
-
+    # Run the heavy model inference with NO database session held. Holding a
+    # transaction across a 60-120s analysis would lock SQLite against the
+    # clinician's concurrent autosaves; this keeps DB lock time to milliseconds.
     analysis = _run_active_pipeline(image_path, patient_context)
-    analysis = _enrich_analysis(image_path, analysis, db_case, patient_context, force_consensus=force_consensus)
-    analysis.setdefault("metadata", {})["runId"] = run_id
 
-    if db_case is not None:
-        _apply_analysis_to_case(db_case, analysis, db)
+    # Short-lived session for the read-enrich-persist tail only.
+    db = SessionLocal()
+    try:
+        db_case: Optional[Case] = None
+        if patient_id:
+            db_case = (
+                db.query(Case)
+                .filter(Case.patient_id == patient_id, Case.is_deleted == 0)
+                .order_by(Case.id.desc())
+                .first()
+            )
 
-    image_hash = _hash_image(image_path)
-    image_quality = analysis.get("metadata", {}).get("imageQuality")
-    _record_inference_ledger(
-        db,
-        run_id=run_id,
-        case_id=patient_id,
-        image_hash=image_hash,
-        analysis=analysis,
-        user_action=user_action,
-        image_quality=image_quality if isinstance(image_quality, (int, float)) else None,
-    )
+        analysis = _enrich_analysis(image_path, analysis, db_case, patient_context, force_consensus=force_consensus)
+        analysis.setdefault("metadata", {})["runId"] = run_id
+
+        if db_case is not None:
+            _apply_analysis_to_case(db_case, analysis, db)
+
+        image_hash = _hash_image(image_path)
+        image_quality = analysis.get("metadata", {}).get("imageQuality")
+        _record_inference_ledger(
+            db,
+            run_id=run_id,
+            case_id=patient_id,
+            image_hash=image_hash,
+            analysis=analysis,
+            user_action=user_action,
+            image_quality=image_quality if isinstance(image_quality, (int, float)) else None,
+        )
+        db.commit()
+    finally:
+        db.close()
 
     total_ms = round((time.perf_counter() - started) * 1000.0, 1)
     analysis.setdefault("metadata", {})["requestLatencyMs"] = total_ms
@@ -2000,106 +2021,195 @@ def _wait_out_memory_pressure(max_wait_sec: float = 30.0, poll_sec: float = 3.0)
         waited += poll_sec
 
 
+def _analysis_timeout_sec() -> float:
+    """Hard ceiling for a single analysis. MLX first-load + generate can take
+    ~2 min on the 8GB box, so the default is generous; past it the job is
+    failed and the case released rather than wedging the pipeline forever."""
+    return _read_env_float("HSIL_ANALYSIS_TIMEOUT_SEC", 300.0)
+
+
+def _release_stuck_case(case_id: Optional[str], message: str) -> None:
+    """Put a case back to a clinician-actionable state after a terminal job
+    failure, in its own short session, so it never hangs as 'analyzing'."""
+    if not case_id:
+        return
+    db = SessionLocal()
+    try:
+        case = (
+            db.query(Case)
+            .filter(Case.patient_id == case_id, Case.is_deleted == 0)
+            .order_by(Case.id.desc())
+            .first()
+        )
+        if case is not None and case.ai_status == "analyzing":
+            case.ai_status = "ready"
+            case.ai_draft_report = message[:400]
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _process_one_job(job_id: str) -> None:
+    """Process a single analysis job using short-lived DB sessions and a
+    watchdog timeout. All DB access is brief; the long model inference holds
+    no session. Any failure marks the job failed/retrying and releases the
+    case — it never leaves a case stuck 'analyzing'."""
+    # --- Phase 1: claim the job (short session) ---
+    db = SessionLocal()
+    try:
+        job = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
+        if job is None:
+            return
+        if job.cancel_requested:
+            job.status = "cancelled"
+            job.progress = 100
+            job.finished_at = datetime.utcnow()
+            db.commit()
+            return
+        job.status = "running"
+        job.progress = 10
+        job.attempts = int(job.attempts or 0) + 1
+        job.started_at = datetime.utcnow()
+        attempts = int(job.attempts or 0)
+        max_retries = int(job.max_retries or 0)
+        image_path = job.image_path
+        case_id = job.case_id
+        patient_context = ""
+        user_action = "async_analyze"
+        force_consensus = False
+        if job.result_json:
+            try:
+                payload = json.loads(job.result_json)
+                patient_context = str(payload.get("patientContext") or "")
+                user_action = str(payload.get("userAction") or user_action)
+                force_consensus = bool(payload.get("forceConsensus", False))
+            except Exception:
+                pass
+        db.commit()
+    finally:
+        db.close()
+
+    # --- Phase 2: run inference with NO session held, under a watchdog ---
+    holder: Dict[str, Any] = {}
+
+    def _run():
+        try:
+            holder["result"] = _execute_analysis_request(
+                image_path=image_path,
+                patient_context=patient_context,
+                patient_id=case_id,
+                user_action=user_action,
+                force_consensus=force_consensus,
+            )
+        except BaseException as ex:  # capture everything; surfaced below
+            holder["error"] = ex
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(_analysis_timeout_sec())
+    timed_out = worker.is_alive()
+
+    # --- Phase 3: persist outcome (short session) ---
+    db = SessionLocal()
+    try:
+        job = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
+        if job is None:
+            return
+        if timed_out:
+            job.status = "failed"
+            job.progress = 100
+            job.finished_at = datetime.utcnow()
+            job.error_message = "Analysis timed out"
+            db.commit()
+            _release_stuck_case(case_id, "Analysis timed out — please retry.")
+        elif "error" in holder:
+            ex = holder["error"]
+            job.error_message = str(ex)[:500]
+            if attempts <= max_retries and not job.cancel_requested:
+                job.status = "retrying"
+                job.progress = 0
+                db.commit()
+                INFERENCE_QUEUE.put(job_id)
+            else:
+                job.status = "failed"
+                job.progress = 100
+                job.finished_at = datetime.utcnow()
+                db.commit()
+                _release_stuck_case(case_id, f"Analysis failed: {str(ex)[:300]}")
+        else:
+            job.status = "completed"
+            job.progress = 100
+            job.finished_at = datetime.utcnow()
+            try:
+                job.result_json = json.dumps(holder.get("result"))
+            except Exception:
+                job.result_json = None
+            db.commit()
+    finally:
+        db.close()
+
+
 def _inference_worker_loop() -> None:
     # Let the executor evict the Ollama model when MLX radiology needs RAM.
     register_ollama_target(_get_ollama_base_url(), _get_local_llm_model())
     while True:
         job_id = INFERENCE_QUEUE.get()
-        # Backpressure: on a swap-pressured 8GB box, wait for memory to
-        # settle before starting another model rather than thrashing. Bounded
-        # so a permanently-pressured box still makes progress.
-        _wait_out_memory_pressure()
-        db = SessionLocal()
         try:
-            job = db.query(InferenceJob).filter(InferenceJob.job_id == job_id).first()
-            if job is None:
-                INFERENCE_QUEUE.task_done()
-                db.close()
-                continue
-
-            if job.cancel_requested:
-                job.status = "cancelled"
-                job.progress = 100
-                job.finished_at = datetime.utcnow()
-                db.commit()
-                INFERENCE_QUEUE.task_done()
-                db.close()
-                continue
-
-            job.status = "running"
-            job.progress = 10
-            job.attempts = int(job.attempts or 0) + 1
-            job.started_at = datetime.utcnow()
-            db.commit()
-
+            # Backpressure: on a swap-pressured 8GB box, wait for memory to
+            # settle before starting another model rather than thrashing.
+            _wait_out_memory_pressure()
+            _process_one_job(job_id)
+        except BaseException as ex:
+            # A single bad job must never kill the worker — log and continue so
+            # the pipeline keeps draining the queue.
             try:
-                patient_context = ""
-                user_action = "async_analyze"
-                if job.result_json:
-                    try:
-                        payload = json.loads(job.result_json)
-                        patient_context = str(payload.get("patientContext") or "")
-                        user_action = str(payload.get("userAction") or user_action)
-                        force_consensus = bool(payload.get("forceConsensus", False))
-                    except Exception:
-                        force_consensus = False
-                else:
-                    force_consensus = False
-
-                if job.cancel_requested:
-                    job.status = "cancelled"
-                    job.progress = 100
-                    job.finished_at = datetime.utcnow()
-                    db.commit()
-                    INFERENCE_QUEUE.task_done()
-                    db.close()
-                    continue
-
-                result = _execute_analysis_request(
-                    db,
-                    image_path=job.image_path,
-                    patient_context=patient_context,
-                    patient_id=job.case_id,
-                    user_action=user_action,
-                    force_consensus=force_consensus,
-                )
-
-                job.status = "completed"
-                job.progress = 100
-                job.finished_at = datetime.utcnow()
-                job.result_json = json.dumps(result)
-                db.commit()
-            except Exception as ex:
-                retryable = int(job.attempts or 0) <= int(job.max_retries or 0)
-                job.error_message = str(ex)
-                if retryable and not job.cancel_requested:
-                    job.status = "retrying"
-                    job.progress = 0
-                    db.commit()
-                    INFERENCE_QUEUE.put(job.job_id)
-                else:
-                    job.status = "failed"
-                    job.progress = 100
-                    job.finished_at = datetime.utcnow()
-                    # Release the case from "analyzing" so it doesn't hang in
-                    # the worklist after a terminal failure.
-                    if job.case_id:
-                        stuck_case = (
-                            db.query(Case)
-                            .filter(Case.patient_id == job.case_id, Case.is_deleted == 0)
-                            .order_by(Case.id.desc())
-                            .first()
-                        )
-                        if stuck_case is not None and stuck_case.ai_status == "analyzing":
-                            stuck_case.ai_status = "ready"
-                            stuck_case.ai_draft_report = f"Analysis failed: {str(ex)[:300]}"
-                    db.commit()
-        finally:
-            try:
-                db.close()
+                print(f"[inference_worker] job {job_id} crashed: {ex}")
+                _write_event("inference_job_crashed", {"jobId": job_id, "error": str(ex)[:300]})
             except Exception:
                 pass
+        finally:
             INFERENCE_QUEUE.task_done()
+
+
+def _recover_orphaned_jobs() -> None:
+    """On startup, re-queue jobs left mid-flight by a previous run/crash so
+    their cases don't hang as 'analyzing' forever. Runs once when the worker
+    starts."""
+    db = SessionLocal()
+    try:
+        orphans = (
+            db.query(InferenceJob)
+            .filter(InferenceJob.status.in_(["running", "queued", "retrying"]))
+            .all()
+        )
+        for job in orphans:
+            job.status = "queued"
+            job.progress = 0
+        db.commit()
+        for job in orphans:
+            INFERENCE_QUEUE.put(job.job_id)
+        if orphans:
+            _write_event("orphaned_jobs_recovered", {"count": len(orphans)})
+    except Exception as ex:
+        db.rollback()
+        print(f"[recover_orphaned_jobs] {ex}")
+    finally:
+        db.close()
+
+
+def _worker_supervisor() -> None:
+    """Keep exactly one worker thread alive; respawn it if it ever dies."""
+    while True:
+        worker = threading.Thread(target=_inference_worker_loop, daemon=True)
+        worker.start()
+        worker.join()  # only returns if the loop somehow exits/dies
+        try:
+            _write_event("inference_worker_respawned", {})
+        except Exception:
+            pass
+        time.sleep(1)
 
 
 def _ensure_inference_worker() -> None:
@@ -2107,9 +2217,21 @@ def _ensure_inference_worker() -> None:
     with INFERENCE_WORKER_LOCK:
         if INFERENCE_WORKER_STARTED:
             return
-        worker = threading.Thread(target=_inference_worker_loop, daemon=True)
-        worker.start()
+        _recover_orphaned_jobs()
+        supervisor = threading.Thread(target=_worker_supervisor, daemon=True)
+        supervisor.start()
         INFERENCE_WORKER_STARTED = True
+
+
+@app.on_event("startup")
+def _start_worker_on_boot() -> None:
+    # Start the worker and recover any jobs orphaned by a previous crash/restart
+    # immediately, so stuck "analyzing" cases self-heal without waiting for the
+    # next upload.
+    try:
+        _ensure_inference_worker()
+    except Exception as ex:
+        print(f"[startup] worker init failed: {ex}")
 
 
 def _enqueue_analysis_job(
@@ -2936,7 +3058,7 @@ def create_finding(patient_id: str, finding: FindingSchema, db: Session = Depend
 
 # AI analysis endpoints
 @app.post("/api/v1/analyze")
-def analyze_xray(data: Dict[Any, Any], db: Session = Depends(get_db)):
+def analyze_xray(data: Dict[Any, Any]):
     image_path = _resolve_image_path(data.get("imagePath"))
     if not image_path or not os.path.exists(image_path):
         raise HTTPException(status_code=400, detail="Valid imagePath is required")
@@ -2947,7 +3069,6 @@ def analyze_xray(data: Dict[Any, Any], db: Session = Depends(get_db)):
     force_consensus = bool(data.get("forceConsensus", False))
 
     return _execute_analysis_request(
-        db,
         image_path=image_path,
         patient_context=patient_context,
         patient_id=patient_id,

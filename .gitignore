@@ -66,3 +66,8 @@ imagedata/
 !*.tsx
 !backend/
 !Frontend/
+
+# SQLite WAL sidecar files (runtime state)
+*.db-wal
+*.db-shm
+*.db-journal

@@ -1,11 +1,34 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, create_engine, text
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, create_engine, text, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
 import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'radflow.db')}"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+
+# The background inference worker and the request threads both write to SQLite.
+# In the default rollback-journal ("delete") mode a writer takes an EXCLUSIVE
+# lock that blocks every other connection — so a clinician autosaving vitals
+# while an analysis runs could deadlock the whole database. WAL lets readers and
+# one writer proceed concurrently; busy_timeout makes a writer wait briefly for
+# the lock instead of failing immediately with "database is locked".
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False, "timeout": 30},
+    pool_pre_ping=True,
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
